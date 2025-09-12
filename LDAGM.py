@@ -77,7 +77,6 @@ class LDAGM(nn.Module):
             nn.Flatten(),
             nn.Dropout(drop_rate),
             nn.Linear(hidden_dimension * feature_num, 1),
-            nn.Sigmoid(),
         )
 
     def forward(self, data):

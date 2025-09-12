@@ -18,6 +18,7 @@ from sklearn.metrics import (
 )
 import itertools
 from datetime import datetime
+from LDAformer import LDAformer
 
 
 class MyDataset(Dataset):
@@ -107,13 +108,27 @@ def train(
     )
     feature_num = dataset.data.shape[1]
     input_dimension = dataset.data.shape[2]
-    model = LDAGM(
-        input_dimension,
-        hidden_dimension,
-        feature_num,
-        hiddenLayer_num,
-        drop_rate=drop_rate,
-        use_aggregate=use_aggregate,
+    # Ensure d_model is divisible by n_heads
+    n_heads = 4  # A reasonable number for multi-head attention
+    if hidden_dimension % n_heads != 0:
+        # Adjust hidden_dimension to be divisible by n_heads
+        hidden_dimension = (hidden_dimension // n_heads) * n_heads
+        print(f"Adjusted hidden_dimension to {hidden_dimension} to be divisible by {n_heads} heads.")
+
+    model = LDAformer(
+        seq_len=feature_num,
+        d_input=input_dimension,
+        d_model=hidden_dimension,
+        n_heads=n_heads,  # Use multiple heads
+        e_layers=4,
+        d_ff=2,  # Standard feed-forward expansion
+        pos_emb=True,
+        value_linear=True,
+        value_sqrt=False,
+        add=True,
+        norm=True,
+        ff=True,
+        dropout=drop_rate,
     ).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=learn_rate, weight_decay=weight_decay
@@ -164,7 +179,7 @@ if __name__ == "__main__":
     # network_num = 4
     # dataset2
     dataset = "dataset2"
-    network_num = 4
+    network_num = 2
     # dataset3
     # dataset = "dataset3"
     # network_num = 2
@@ -203,11 +218,11 @@ if __name__ == "__main__":
         )
         # Setting Model Parameters
         # dataset1
-        hidden_dimension = 40
+        hidden_dimension = 16
         hiddenLayer_num = 2
         drop_rate = 0.1
         batch_size = 32
-        epochs = [1,2,3,4,5]
+        epochs = [5, 10, 15, 20]
         use_aggregate = True
         learn_rate = 1e-2
         weight_decay = 1e-4
