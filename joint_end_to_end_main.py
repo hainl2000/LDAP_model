@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import copy
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import DataLoader, Dataset
@@ -22,6 +23,9 @@ from sklearn.metrics import (
     matthews_corrcoef,
 )
 import warnings
+import os
+import csv
+import config
 warnings.filterwarnings("ignore")
 
 class JointDataset(Dataset):
@@ -29,9 +33,8 @@ class JointDataset(Dataset):
     Dataset for joint end-to-end training that provides both graph structure 
     and node pair features for link prediction.
     """
-    def __init__(self, adj_matrix, positive_ij, negative_ij, mode, dataset):
+    def __init__(self, positive_ij, negative_ij, mode, dataset):
         super().__init__()
-        self.adj_matrix = adj_matrix
         
         # Combine positive and negative samples
         all_ij = np.vstack([positive_ij, negative_ij])
@@ -54,8 +57,8 @@ class JointVGAE_LDAGM(nn.Module):
     and LDAGM for link prediction in an end-to-end manner.
     """
     def __init__(self, num_lnc, num_diseases, num_mi, vgae_in_dim, vgae_hidden_dim, vgae_embed_dim, 
-                 ldagm_hidden_dim, ldagm_layers, drop_rate=0.1, use_aggregate=True, 
-                 gcn_hidden_dim=128, fusion_output_dim=128):
+                 ldagm_hidden_dim, ldagm_layers, drop_rate=config.DROP_RATE, use_aggregate=config.USE_AGGREGATE, 
+                 gcn_hidden_dim=config.GCN_HIDDEN_DIM, fusion_output_dim=config.FUSION_OUTPUT_DIM):
         super(JointVGAE_LDAGM, self).__init__()
         
         # Store dimensions for multi-view processing
@@ -234,11 +237,23 @@ def joint_loss_function(reconstructed_adj, original_adj, mu, log_var,
         'total': total_loss.item()
     }
 
+def log_hyperparameters():
+    if not os.path.exists(os.path.dirname(config.LOG_FILE)):
+        os.makedirs(os.path.dirname(config.LOG_FILE))
+    with open(config.LOG_FILE, 'a') as f:
+        f.write("Hyperparameters:\n")
+        for key, value in vars(config).items():
+            if not key.startswith('__'):
+                f.write(f"{key}: {value} -- ")
+        f.write("\n")
+
 def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data, 
                lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, 
-               batch_size=32, epochs=1, lr=1e-3, weight_decay=1e-4, device='cpu', 
-               vgae_weight=1.0, link_weight=2.0, kl_weight=0.1,
-               vgae_hidden_dim=32, vgae_embed_dim=16, ldagm_hidden_dim=40, ldagm_layers=3):
+               batch_size=config.BATCH_SIZE, epochs=config.EPOCHS, lr=config.LEARNING_RATE, 
+               weight_decay=config.WEIGHT_DECAY, device=config.DEVICE, 
+               vgae_weight=config.VGAE_WEIGHT, link_weight=config.LINK_WEIGHT, kl_weight=config.KL_WEIGHT,
+               vgae_hidden_dim=config.VGAE_HIDDEN_DIM, vgae_embed_dim=config.VGAE_EMBED_DIM, 
+               ldagm_hidden_dim=config.LDAGM_HIDDEN_DIM, ldagm_layers=config.LDAGM_LAYERS):
     """
     Joint end-to-end training function with GCN-Attention integration.
     Creates model internally and handles all training setup.
@@ -268,25 +283,18 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
     Returns:
         Trained model and loss history
     """
-    # Create placeholder matrices for concatenation (actual features come from GCN-Attention)
-    lnc_placeholder = np.eye(num_lnc)
-    disease_placeholder = np.eye(num_diseases) 
-    mi_placeholder = np.eye(num_mi)
     
     # Convert interactions to numpy for concatenation
     lnc_di_np = lnc_di_interaction.detach().cpu().numpy()
     lnc_mi_np = lnc_mi_interaction.detach().cpu().numpy()
     mi_di_np = mi_di_interaction.detach().cpu().numpy()
-    
-    A_numpy = concatenate(num_lnc, num_diseases, num_mi, lnc_di_np, lnc_mi_np, mi_di_np, 
-                         lnc_placeholder, disease_placeholder, mi_placeholder)
-    A = torch.Tensor(A_numpy).to(device)
-    
+
     # Model parameters
     num_nodes = num_lnc + num_diseases + num_mi
     in_dimension = num_lnc + num_diseases + num_mi
-    pos_weight = torch.tensor(float(num_nodes**2 - A.sum()) / A.sum()).to(device)
-    
+    total_links = (lnc_di_np.sum() + lnc_mi_np.sum() + mi_di_np.sum())*2 + num_lnc + num_diseases + num_mi
+    pos_weight = torch.tensor(float(num_nodes**2 - total_links) / total_links, device=device)
+
     # Initialize joint model
     model = JointVGAE_LDAGM(
         num_lnc=num_lnc,
@@ -297,10 +305,10 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         vgae_embed_dim=vgae_embed_dim,
         ldagm_hidden_dim=ldagm_hidden_dim,
         ldagm_layers=ldagm_layers,
-        drop_rate=0.1,
-        use_aggregate=True,
-        gcn_hidden_dim=128,
-        fusion_output_dim=128
+        drop_rate=config.DROP_RATE,
+        use_aggregate=config.USE_AGGREGATE,
+        gcn_hidden_dim=config.GCN_HIDDEN_DIM,
+        fusion_output_dim=config.FUSION_OUTPUT_DIM
     )
     
     model = model.to(device)
@@ -355,8 +363,16 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         }
         loss_history.append(avg_losses)
         
+        with open(config.LOG_FILE, 'a') as f:
+            f.write(f"  Epoch {epoch+1}/{epochs}:\n")
+            f.write(f"  Total Loss: {avg_losses['total']:.4f}\n")
+            f.write(f"  VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}\n")
+            f.write(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}\n")
+            f.write(f"  Link Prediction: {avg_losses['link_prediction']:.4f}\n")
+            f.write("-----------------------")
+
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs}:")
+            print(f"  Epoch {epoch+1}/{epochs}:")
             print(f"  Total Loss: {avg_losses['total']:.4f}")
             print(f"  VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}")
             print(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}")
@@ -407,11 +423,29 @@ def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_
     
     return np.array(all_labels), np.array(all_predictions)
 
+def log_to_csv(config, metrics):
+    if not os.path.exists(os.path.dirname(config.CSV_LOG_FILE)):
+        os.makedirs(os.path.dirname(config.CSV_LOG_FILE))
+
+    hyperparams = {k: v for k, v in vars(config).items() if not k.startswith('__')}
+    fieldnames = list(hyperparams.keys()) + list(metrics.keys())
+
+    file_exists = os.path.isfile(config.CSV_LOG_FILE)
+
+    with open(config.CSV_LOG_FILE, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({**metrics, **hyperparams})
+
 if __name__ == '__main__':
+    log_hyperparameters()
+    start_time = time.time()
+    
     # Configuration
-    dataset = "dataset2"
-    fold = 0
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    dataset = config.DATASET
+    fold = config.FOLD
+    device = torch.device(config.DEVICE) if torch.backends.mps.is_available() else torch.device("cpu")
     print(f"Using device: {device}")
     
     # Load data (same as original)
@@ -475,20 +509,9 @@ if __name__ == '__main__':
         torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
     ]
     
-    # Create placeholder matrices for concatenation (actual features come from GCN-Attention)
-    lnc_placeholder = np.eye(num_lnc)
-    disease_placeholder = np.eye(num_diseases) 
-    mi_placeholder = np.eye(num_mi)
-    A_numpy = concatenate(num_lnc, num_diseases, num_mi, lnc_di_copy, lnc_mi, mi_di, 
-                         lnc_placeholder, disease_placeholder, mi_placeholder)
-    A = torch.Tensor(A_numpy).to(device)
-
-    # Prepare inputs for dataset creation
-    adj_input = A + torch.eye(A.shape[0]).to(device)
-    
     # Create datasets
-    train_dataset = JointDataset(adj_input, train_positive_ij, train_negative_ij, "train", dataset)
-    test_dataset = JointDataset(adj_input, test_positive_ij, test_negative_ij, "test", dataset)
+    train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
+    test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
     
     # Prepare multi-view data structure for GCN-Attention
     multi_view_data = {
@@ -514,14 +537,7 @@ if __name__ == '__main__':
         lnc_di_interaction=lnc_di_tensor,
         lnc_mi_interaction=lnc_mi_tensor,
         mi_di_interaction=mi_di_tensor,
-        batch_size=32,
-        epochs=1,
-        lr=1e-3,
-        weight_decay=1e-4,
-        device=device,
-        vgae_weight=1.0,
-        link_weight=2.0,  # Higher weight for link prediction task
-        kl_weight=0.1
+        device=device
     )
     
     print("\nTesting joint model...")
@@ -534,7 +550,7 @@ if __name__ == '__main__':
         lnc_di_interaction=lnc_di_tensor,
         lnc_mi_interaction=lnc_mi_tensor,
         mi_di_interaction=mi_di_tensor,
-        batch_size=32,
+        batch_size=config.BATCH_SIZE,
         device=device
     )
     
@@ -550,7 +566,7 @@ if __name__ == '__main__':
     P = precision_score(test_labels, binary_preds)
     R = recall_score(test_labels, binary_preds)
     F1 = f1_score(test_labels, binary_preds)
-    
+
     print("\n=== Joint End-to-End Training Results ===")
     print(f"AUC: {AUC:.4f}")
     print(f"AUPR: {AUPR:.4f}")
@@ -561,3 +577,26 @@ if __name__ == '__main__':
     print(f"F1-Score: {F1:.4f}")
     
     print("\nJoint end-to-end training completed successfully!")
+    end_time = time.time()
+    total_seconds = end_time - start_time
+    m, s = divmod(total_seconds, 60)
+    h, m = divmod(m, 60)
+    print(f"\nTotal runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds")
+        # Log and print results
+    with open(config.LOG_FILE, 'a') as f:
+        f.write("\n=== Joint End-to-End Training Results ===\n")
+        f.write(f"AUC: {AUC:.4f}, AUPR: {AUPR:.4f}, MCC: {MCC:.4f}, ACC: {ACC:.4f}, Precision: {P:.4f}, Recall: {R:.4f}, F1-Score: {F1:.4f}\n")
+        f.write(f"Finish Testing in {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds\n")
+        f.write("================================================\n")
+
+    metrics = {
+        "AUC": AUC,
+        "AUPR": AUPR,
+        "MCC": MCC,
+        "ACC": ACC,
+        "Precision": P,
+        "Recall": R,
+        "F1-Score": F1,
+        "Time": f"{int(h)} hours, {int(m)} minutes, and {s:.2f} seconds",
+    }
+    log_to_csv(config, metrics)

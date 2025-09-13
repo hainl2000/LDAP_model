@@ -9,3 +9,4 @@ our_dataset/dataset2/view_attention/
 our_dataset/dataset1/A_new_encoder/
 our_dataset/dataset3/A_new_encoder/
 our_dataset/dataset2/result/gate_results.csv
+logs/

@@ -54,8 +54,8 @@ class LDAGM(nn.Module):
         hidden_dimension,
         feature_num,
         hiddenLayer_num,
-        drop_rate=0.05,
-        use_aggregate=True,
+        drop_rate,
+        use_aggregate,
     ):
         super(LDAGM, self).__init__()
         self.use_aggregate = use_aggregate

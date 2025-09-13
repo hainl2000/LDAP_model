@@ -170,8 +170,6 @@ class AttentionFusion(nn.Module):
         fusion_input = weighted_embeddings.permute(1, 0, 2).reshape(num_nodes, -1)
         
         fused_features = self.fusion_mlp(fusion_input)
-        print(f'Fused feature shape: {fused_features.shape}')
-        exit()
         return fused_features, attention_weights
 
 # =============================================================================
