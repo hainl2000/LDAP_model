@@ -364,11 +364,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         loss_history.append(avg_losses)
         
         with open(config.LOG_FILE, 'a') as f:
-            f.write(f"  Epoch {epoch+1}/{epochs}:\n")
-            f.write(f"  Total Loss: {avg_losses['total']:.4f}\n")
-            f.write(f"  VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}\n")
-            f.write(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}\n")
-            f.write(f"  Link Prediction: {avg_losses['link_prediction']:.4f}\n")
+            f.write(f"Epoch {epoch+1}/{epochs}: Total Loss: {avg_losses['total']:.4f}, VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}, KL Divergence: {avg_losses['kl_divergence']:.4f}, Link Prediction: {avg_losses['link_prediction']:.4f}\n")
             f.write("-----------------------")
 
         if (epoch + 1) % 10 == 0:
