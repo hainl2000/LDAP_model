@@ -28,6 +28,7 @@ import csv
 import config
 warnings.filterwarnings("ignore")
 
+
 class JointDataset(Dataset):
     """
     Dataset for joint end-to-end training that provides both graph structure 
@@ -96,9 +97,16 @@ class JointVGAE_LDAGM(nn.Module):
         self.vgae = VGAE_Model(vgae_in_dim, vgae_hidden_dim, vgae_embed_dim)
         
         # LDAGM component for link prediction
-        # Input dimension: 2 * vgae_embed_dim (concatenated node embeddings)
+        # Input dimension: flattened features from pair_features tensor
+        # pair_features shape: [batch_size, 2, features_per_node]
+        # After flattening: [batch_size, 2 * features_per_node]
+        # features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)
+        a_encoder_dim = 128  # Based on A_encoder file shape
+        network_num = 4  # Number of networks (from config or forward method parameter)
+        features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)  # 4 networks * (128 + 128) = 1024
+        ldagm_input_dim = 2 * features_per_node  # 2 nodes * 1024 = 2048
         self.ldagm = LDAGM(
-            input_dimension=2 * vgae_embed_dim,
+            input_dimension=ldagm_input_dim,
             hidden_dimension=ldagm_hidden_dim,
             feature_num=1,  # Single feature vector per node pair
             hiddenLayer_num=ldagm_layers,
@@ -106,7 +114,7 @@ class JointVGAE_LDAGM(nn.Module):
             use_aggregate=use_aggregate
         )
         
-    def forward(self, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, node_pairs=None):
+    def forward(self, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, node_pairs=None, network_num=4, fold=0, dataset="dataset1"):
         """
         Forward pass for joint end-to-end training.
         
@@ -119,6 +127,9 @@ class JointVGAE_LDAGM(nn.Module):
             lnc_mi_interaction: lncRNA-miRNA interaction matrix
             mi_di_interaction: miRNA-disease interaction matrix
             node_pairs: Node pairs for link prediction (optional)
+            network_num: Number of networks for A_encoder loading
+            fold: Fold number for A_encoder file paths
+            dataset: Dataset name for A_encoder file paths
             
         Returns:
             If node_pairs is None: (reconstructed_adj, mu, log_var)
@@ -163,7 +174,7 @@ class JointVGAE_LDAGM(nn.Module):
         
         # Step 4: Add self-loops and create features
         num_nodes = adj_matrix.shape[0]
-        adj_input = adj_matrix + torch.eye(num_nodes, device=adj_matrix.device)
+        adj_input = adj_matrix
         features_input = torch.eye(num_nodes, device=adj_matrix.device)
         
         # Step 5: VGAE forward pass
@@ -172,18 +183,68 @@ class JointVGAE_LDAGM(nn.Module):
         if node_pairs is None:
             return reconstructed_adj, mu, log_var
         
-        # Step 6: Extract node embeddings for link prediction
-        node1_embeddings = mu[node_pairs[:, 0]]  # Shape: [batch_size, embed_dim]
-        node2_embeddings = mu[node_pairs[:, 1]]  # Shape: [batch_size, embed_dim]
+        # Step 6: Extract features for link prediction following MyDataset pattern
+        # Get VGAE embeddings
+        # node1_embeddings = mu[node_pairs[:, 0]]
+        # node2_embeddings = mu[node_pairs[:, 1]]
+
+        # # Get structural features from the adjacency matrix
+        # node1_adj_features = adj_input[node_pairs[:, 0]]
+        # node2_adj_features = adj_input[node_pairs[:, 1]]
+
+        # # Concatenate embeddings with structural features for each node
+        # node1_combined_features = torch.cat([node1_embeddings, node1_adj_features], dim=1)
+        # node2_combined_features = torch.cat([node2_embeddings, node2_adj_features], dim=1)
+
+        # # Concatenate features of the pair of nodes
+        # pair_features = torch.cat([node1_combined_features, node2_combined_features], dim=1)
         
-        # Concatenate node embeddings
-        pair_features = torch.cat([node1_embeddings, node2_embeddings], dim=1)
-        # Reshape for LDAGM: [batch_size, 1, 2*embed_dim]
-        pair_features = pair_features.unsqueeze(1)
+        # # Reshape for LDAGM
+        # pair_features = pair_features.unsqueeze(1)
+
+
+
+        # Load A_encoder files for each network in the loop
+        A_encoders = []
+        for i in range(network_num):
+            A_encoder = np.load(
+                "./our_dataset/"
+                + dataset
+                + "/A_encoder/A_"
+                + str(fold + 1)
+                + "_"
+                + str(i + 1)
+                + ".npy"
+            )
+            A_encoders.append(torch.tensor(A_encoder, dtype=torch.float32, device=adj_matrix.device))
+        
+        # Get computational embeddings from VGAE
+        node1_computational_embeddings = mu[node_pairs[:, 0]]
+        node2_computational_embeddings = mu[node_pairs[:, 1]]
+        
+        # Collect features from all networks for each node
+        node1_all_features = []
+        node2_all_features = []
+        
+        for i in range(network_num):
+            # Concatenate computational embeddings with A_encoder features for each network
+            node1_features_net_i = torch.cat([node1_computational_embeddings, A_encoders[i][node_pairs[:, 0]]], dim=1)
+            node2_features_net_i = torch.cat([node2_computational_embeddings, A_encoders[i][node_pairs[:, 1]]], dim=1)
+            
+            node1_all_features.append(node1_features_net_i)
+            node2_all_features.append(node2_features_net_i)
+        
+        # Concatenate features from all networks for each node
+        node1_final_features = torch.cat(node1_all_features, dim=1)
+        node2_final_features = torch.cat(node2_all_features, dim=1)
+        
+        # Stack node1 and node2 final features
+        pair_features = torch.stack([node1_final_features, node2_final_features], dim=1)
         
         # Step 7: LDAGM forward pass for link prediction
-        link_predictions = self.ldagm(pair_features)
-        
+        # Reshape from [batch_size, 2, features] to [batch_size, 2*features] for LDAGM
+        pair_features_flattened = pair_features.view(pair_features.size(0), -1)
+        link_predictions = self.ldagm(pair_features_flattened)
         return reconstructed_adj, mu, log_var, link_predictions
 
 def joint_loss_function(reconstructed_adj, original_adj, mu, log_var, 
@@ -333,14 +394,16 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             
             # Forward pass with end-to-end GCN-Attention + VGAE + LDAGM
             reconstructed_adj, mu, log_var, link_predictions = model(
-                multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs
+                multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs, 
+                network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET
             )
             
             # Get the original adjacency matrix from the model's forward pass
             # We need to call the model again without node_pairs to get the original adj matrix
             with torch.no_grad():
                 original_adj_reconstructed, _, _ = model(
-                    multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, None
+                    multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, None,
+                    network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET
                 )
             
             # Compute joint loss using the dynamically generated adjacency matrix
@@ -409,7 +472,8 @@ def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_
             batch_node_pairs = batch_node_pairs.to(device)
             
             # Forward pass with end-to-end GCN-Attention integration
-            _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs)
+            _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs,
+                                            network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET)
             
             # Apply sigmoid to get probabilities
             predictions = torch.sigmoid(link_predictions)
