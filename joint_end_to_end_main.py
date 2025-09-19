@@ -184,26 +184,6 @@ class JointVGAE_LDAGM(nn.Module):
             return reconstructed_adj, mu, log_var
         
         # Step 6: Extract features for link prediction following MyDataset pattern
-        # Get VGAE embeddings
-        # node1_embeddings = mu[node_pairs[:, 0]]
-        # node2_embeddings = mu[node_pairs[:, 1]]
-
-        # # Get structural features from the adjacency matrix
-        # node1_adj_features = adj_input[node_pairs[:, 0]]
-        # node2_adj_features = adj_input[node_pairs[:, 1]]
-
-        # # Concatenate embeddings with structural features for each node
-        # node1_combined_features = torch.cat([node1_embeddings, node1_adj_features], dim=1)
-        # node2_combined_features = torch.cat([node2_embeddings, node2_adj_features], dim=1)
-
-        # # Concatenate features of the pair of nodes
-        # pair_features = torch.cat([node1_combined_features, node2_combined_features], dim=1)
-        
-        # # Reshape for LDAGM
-        # pair_features = pair_features.unsqueeze(1)
-
-
-
         # Load A_encoder files for each network in the loop
         A_encoders = []
         for i in range(network_num):
@@ -309,8 +289,8 @@ def log_hyperparameters():
         f.write("\n")
 
 def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data, 
-               lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, 
-               batch_size=config.BATCH_SIZE, epochs=config.EPOCHS, lr=config.LEARNING_RATE, 
+               lnc_di_interaction, lnc_mi_interaction, mi_di_interaction,
+               fold=0, batch_size=config.BATCH_SIZE, epochs=config.EPOCHS, lr=config.LEARNING_RATE, 
                weight_decay=config.WEIGHT_DECAY, device=config.DEVICE, 
                vgae_weight=config.VGAE_WEIGHT, link_weight=config.LINK_WEIGHT, kl_weight=config.KL_WEIGHT,
                vgae_hidden_dim=config.VGAE_HIDDEN_DIM, vgae_embed_dim=config.VGAE_EMBED_DIM, 
@@ -395,7 +375,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             # Forward pass with end-to-end GCN-Attention + VGAE + LDAGM
             reconstructed_adj, mu, log_var, link_predictions = model(
                 multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs, 
-                network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET
+                network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
             )
             
             # Get the original adjacency matrix from the model's forward pass
@@ -403,7 +383,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             with torch.no_grad():
                 original_adj_reconstructed, _, _ = model(
                     multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, None,
-                    network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET
+                    network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
                 )
             
             # Compute joint loss using the dynamically generated adjacency matrix
@@ -439,7 +419,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
     
     return model, loss_history
 
-def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, device='cpu'):
+def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, fold=0, device='cpu'):
     """
     Test function for joint model with GCN-Attention integration.
     
@@ -473,7 +453,7 @@ def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_
             
             # Forward pass with end-to-end GCN-Attention integration
             _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs,
-                                            network_num=config.NETWORK_NUM, fold=config.FOLD, dataset=config.DATASET)
+                                            network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET)
             
             # Apply sigmoid to get probabilities
             predictions = torch.sigmoid(link_predictions)
@@ -504,159 +484,211 @@ if __name__ == '__main__':
     
     # Configuration
     dataset = config.DATASET
-    fold = config.FOLD
     device = torch.device(config.DEVICE) if torch.backends.mps.is_available() else torch.device("cpu")
     print(f"Using device: {device}")
     
-    # Load data (same as original)
-    positive5foldsidx = np.load(
-        "./our_dataset/" + dataset + "/index/positive5foldsidx.npy",
-        allow_pickle=True,
-    )
-    negative5foldsidx = np.load(
-        "./our_dataset/" + dataset + "/index/negative5foldsidx.npy",
-        allow_pickle=True,
-    )
-    positive_ij = np.load("./our_dataset/" + dataset + "/index/positive_ij.npy")
-    negative_ij = np.load("./our_dataset/" + dataset + "/index/negative_ij.npy")
+    # Initialize results storage for all folds
+    all_fold_results = []
     
-    train_positive_ij = positive_ij[positive5foldsidx[fold]["train"]]
-    train_negative_ij = negative_ij[negative5foldsidx[fold]["train"]]
-    test_positive_ij = positive_ij[positive5foldsidx[fold]["test"]]
-    test_negative_ij = negative_ij[negative5foldsidx[fold]["test"]]
+    print(f"Starting 5-fold cross-validation for {dataset}...")
     
-    # Load similarity matrices
-    di_semantic_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_semantic_similarity.npy")
-    di_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_gip_similarity_fold_{fold+1}.npy")
-    lnc_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_gip_similarity_fold_{fold+1}.npy")
-    lnc_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_func_similarity_fold_{fold+1}.npy")
-    mi_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_gip_similarity.npy")
-    mi_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_func_similarity.npy")
+    for fold in range(config.TOTAL_FOLDS):
+        print(f"\n{'='*50}")
+        print(f"Starting Fold {fold + 1}/5")
+        print(f"{'='*50}")
     
-    # Load interaction matrices
-    lnc_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_di.csv')
-    lnc_di.set_index('0', inplace=True)
-    lnc_di = lnc_di.values
-    lnc_di_copy = copy.copy(lnc_di)
+        # Load data (same as original)
+        positive5foldsidx = np.load(
+            "./our_dataset/" + dataset + "/index/positive5foldsidx.npy",
+            allow_pickle=True,
+        )
+        negative5foldsidx = np.load(
+            "./our_dataset/" + dataset + "/index/negative5foldsidx.npy",
+            allow_pickle=True,
+        )
+        positive_ij = np.load("./our_dataset/" + dataset + "/index/positive_ij.npy")
+        negative_ij = np.load("./our_dataset/" + dataset + "/index/negative_ij.npy")
     
-    lnc_mi = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_mi.csv', index_col='0').values
-    mi_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/mi_di.csv')
-    mi_di.set_index('0', inplace=True)
-    mi_di = mi_di.values
+        train_positive_ij = positive_ij[positive5foldsidx[fold]["train"]]
+        train_negative_ij = negative_ij[negative5foldsidx[fold]["train"]]
+        test_positive_ij = positive_ij[positive5foldsidx[fold]["test"]]
+        test_negative_ij = negative_ij[negative5foldsidx[fold]["test"]]
     
-    # Get dimensions
-    num_diseases = di_semantic_similarity.shape[0]
-    num_lnc = lnc_gip_similarity.shape[0]
-    num_mi = mi_gip_similarity.shape[0]
-    num_views = 2
-    lncRNALen = num_lnc
+        # Load similarity matrices
+        di_semantic_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_semantic_similarity.npy")
+        di_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_gip_similarity_fold_{fold+1}.npy")
+        lnc_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_gip_similarity_fold_{fold+1}.npy")
+        lnc_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_func_similarity_fold_{fold+1}.npy")
+        mi_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_gip_similarity.npy")
+        mi_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_func_similarity.npy")
     
-    # Remove test edges from training adjacency matrix
-    for ij in positive_ij[positive5foldsidx[fold]['test']]:
-        lnc_di_copy[ij[0], ij[1] - lncRNALen] = 0
+        # Load interaction matrices
+        lnc_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_di.csv')
+        lnc_di.set_index('0', inplace=True)
+        lnc_di = lnc_di.values
+        lnc_di_copy = copy.copy(lnc_di)
+        
+        lnc_mi = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_mi.csv', index_col='0').values
+        mi_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/mi_di.csv')
+        mi_di.set_index('0', inplace=True)
+        mi_di = mi_di.values
     
-    # Create adjacency matrices for each entity type
-    disease_adjacency_matrices = [
-        torch.tensor(di_semantic_similarity, dtype=torch.float32).to(device), 
-        torch.tensor(di_gip_similarity, dtype=torch.float32).to(device)
-    ]
-    lnaRNA_adjacency_matrices = [
-        torch.tensor(lnc_gip_similarity, dtype=torch.float32).to(device), 
-        torch.tensor(lnc_func_similarity, dtype=torch.float32).to(device)
-    ]
-    miRNA_adjacency_matrices = [
-        torch.tensor(mi_gip_similarity, dtype=torch.float32).to(device), 
-        torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
-    ]
+        # Get dimensions
+        num_diseases = di_semantic_similarity.shape[0]
+        num_lnc = lnc_gip_similarity.shape[0]
+        num_mi = mi_gip_similarity.shape[0]
+        num_views = 2
+        lncRNALen = num_lnc
+        
+        # Remove test edges from training adjacency matrix
+        for ij in positive_ij[positive5foldsidx[fold]['test']]:
+            lnc_di_copy[ij[0], ij[1] - lncRNALen] = 0
     
-    # Create datasets
-    train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
-    test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
+        # Create adjacency matrices for each entity type
+        disease_adjacency_matrices = [
+            torch.tensor(di_semantic_similarity, dtype=torch.float32).to(device), 
+            torch.tensor(di_gip_similarity, dtype=torch.float32).to(device)
+        ]
+        lnaRNA_adjacency_matrices = [
+            torch.tensor(lnc_gip_similarity, dtype=torch.float32).to(device), 
+            torch.tensor(lnc_func_similarity, dtype=torch.float32).to(device)
+        ]
+        miRNA_adjacency_matrices = [
+            torch.tensor(mi_gip_similarity, dtype=torch.float32).to(device), 
+            torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
+        ]
+        
+        # Create datasets
+        train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
+        test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
     
-    # Prepare multi-view data structure for GCN-Attention
-    multi_view_data = {
-        'disease': disease_adjacency_matrices,
-        'lnc': lnaRNA_adjacency_matrices,
-        'mi': miRNA_adjacency_matrices
-    }
+        # Prepare multi-view data structure for GCN-Attention
+        multi_view_data = {
+            'disease': disease_adjacency_matrices,
+            'lnc': lnaRNA_adjacency_matrices,
+            'mi': miRNA_adjacency_matrices
+        }
+        
+        # Prepare interaction matrices as tensors
+        lnc_di_tensor = torch.tensor(lnc_di_copy, dtype=torch.float32).to(device)
+        lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
+        mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
+        
+        print(f"Starting joint end-to-end training for fold {fold + 1}...")
+        
+        # Joint training with end-to-end GCN-Attention integration
+        trained_model, loss_history = joint_train(
+            num_lnc=num_lnc,
+            num_diseases=num_diseases,
+            num_mi=num_mi,
+            train_dataset=train_dataset,
+            multi_view_data=multi_view_data,
+            lnc_di_interaction=lnc_di_tensor,
+            lnc_mi_interaction=lnc_mi_tensor,
+            mi_di_interaction=mi_di_tensor,
+            fold=fold,
+            device=device
+        )
     
-    # Prepare interaction matrices as tensors
-    lnc_di_tensor = torch.tensor(lnc_di_copy, dtype=torch.float32).to(device)
-    lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
-    mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
-    
-    print("Starting joint end-to-end training...")
-    
-    # Joint training with end-to-end GCN-Attention integration
-    trained_model, loss_history = joint_train(
-        num_lnc=num_lnc,
-        num_diseases=num_diseases,
-        num_mi=num_mi,
-        train_dataset=train_dataset,
-        multi_view_data=multi_view_data,
-        lnc_di_interaction=lnc_di_tensor,
-        lnc_mi_interaction=lnc_mi_tensor,
-        mi_di_interaction=mi_di_tensor,
-        device=device
-    )
-    
-    print("\nTesting joint model...")
-    
-    # Testing with end-to-end GCN-Attention integration
-    test_labels, test_predictions = joint_test(
-        model=trained_model,
-        test_dataset=test_dataset,
-        multi_view_data=multi_view_data,
-        lnc_di_interaction=lnc_di_tensor,
-        lnc_mi_interaction=lnc_mi_tensor,
-        mi_di_interaction=mi_di_tensor,
-        batch_size=config.BATCH_SIZE,
-        device=device
-    )
-    
-    # Evaluate results
-    AUC = roc_auc_score(test_labels, test_predictions)
-    precision, recall, _ = precision_recall_curve(test_labels, test_predictions)
-    AUPR = auc(recall, precision)
-    
-    # Binary predictions for other metrics
-    binary_preds = (test_predictions > 0.5).astype(int)
-    MCC = matthews_corrcoef(test_labels, binary_preds)
-    ACC = accuracy_score(test_labels, binary_preds)
-    P = precision_score(test_labels, binary_preds)
-    R = recall_score(test_labels, binary_preds)
-    F1 = f1_score(test_labels, binary_preds)
+        print(f"\nTesting joint model for fold {fold + 1}...")
+        
+        # Testing with end-to-end GCN-Attention integration
+        test_labels, test_predictions = joint_test(
+            model=trained_model,
+            test_dataset=test_dataset,
+            multi_view_data=multi_view_data,
+            lnc_di_interaction=lnc_di_tensor,
+            lnc_mi_interaction=lnc_mi_tensor,
+            mi_di_interaction=mi_di_tensor,
+            fold=fold,
+            batch_size=config.BATCH_SIZE,
+            device=device
+        )
+        
+        # Evaluate results
+        AUC = roc_auc_score(test_labels, test_predictions)
+        precision, recall, _ = precision_recall_curve(test_labels, test_predictions)
+        AUPR = auc(recall, precision)
+        
+        # Binary predictions for other metrics
+        binary_preds = (test_predictions > 0.5).astype(int)
+        MCC = matthews_corrcoef(test_labels, binary_preds)
+        ACC = accuracy_score(test_labels, binary_preds)
+        P = precision_score(test_labels, binary_preds)
+        R = recall_score(test_labels, binary_preds)
+        F1 = f1_score(test_labels, binary_preds)
 
-    print("\n=== Joint End-to-End Training Results ===")
-    print(f"AUC: {AUC:.4f}")
-    print(f"AUPR: {AUPR:.4f}")
-    print(f"MCC: {MCC:.4f}")
-    print(f"ACC: {ACC:.4f}")
-    print(f"Precision: {P:.4f}")
-    print(f"Recall: {R:.4f}")
-    print(f"F1-Score: {F1:.4f}")
+        print(f"\n=== Fold {fold + 1} Results ===")
+        print(f"AUC: {AUC:.4f}")
+        print(f"AUPR: {AUPR:.4f}")
+        print(f"MCC: {MCC:.4f}")
+        print(f"ACC: {ACC:.4f}")
+        print(f"Precision: {P:.4f}")
+        print(f"Recall: {R:.4f}")
+        print(f"F1-Score: {F1:.4f}")
+        
+        # Store results for this fold
+        fold_results = {
+            "fold": fold + 1,
+            "AUC": AUC,
+            "AUPR": AUPR,
+            "MCC": MCC,
+            "ACC": ACC,
+            "Precision": P,
+            "Recall": R,
+            "F1-Score": F1
+        }
+        all_fold_results.append(fold_results)
     
-    print("\nJoint end-to-end training completed successfully!")
+    # Calculate statistics across all folds
+    print("\n" + "="*60)
+    print("5-FOLD CROSS-VALIDATION RESULTS SUMMARY")
+    print("="*60)
+    
+    # Convert results to DataFrame for easier analysis
+    results_df = pd.DataFrame(all_fold_results)
+    
+    # Calculate mean and std for each metric
+    metrics = ['AUC', 'AUPR', 'MCC', 'ACC', 'Precision', 'Recall', 'F1-Score']
+    
+    print("\nDetailed Results by Fold:")
+    print(results_df.to_string(index=False, float_format='%.4f'))
+    
+    print("\nStatistical Summary:")
+    print("-" * 50)
+    for metric in metrics:
+        mean_val = results_df[metric].mean()
+        std_val = results_df[metric].std()
+        print(f"{metric:12s}: {mean_val:.4f} ± {std_val:.4f}")
+    
+    # End timing
     end_time = time.time()
     total_seconds = end_time - start_time
     m, s = divmod(total_seconds, 60)
     h, m = divmod(m, 60)
     print(f"\nTotal runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds")
-        # Log and print results
+    
+    # Log to file
     with open(config.LOG_FILE, 'a') as f:
-        f.write("\n=== Joint End-to-End Training Results ===\n")
-        f.write(f"AUC: {AUC:.4f}, AUPR: {AUPR:.4f}, MCC: {MCC:.4f}, ACC: {ACC:.4f}, Precision: {P:.4f}, Recall: {R:.4f}, F1-Score: {F1:.4f}\n")
-        f.write(f"Finish Testing in {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds\n")
+        f.write("\n=== 5-Fold Cross-Validation Results ===\n")
+        for metric in metrics:
+            mean_val = results_df[metric].mean()
+            std_val = results_df[metric].std()
+            f.write(f"{metric}: {mean_val:.4f} ± {std_val:.4f}\n")
+        f.write(f"Total runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds\n")
         f.write("================================================\n")
-
-    metrics = {
-        "AUC": AUC,
-        "AUPR": AUPR,
-        "MCC": MCC,
-        "ACC": ACC,
-        "Precision": P,
-        "Recall": R,
-        "F1-Score": F1,
+    
+    # Log average metrics to CSV
+    avg_metrics = {
+        "AUC": results_df['AUC'].mean(),
+        "AUPR": results_df['AUPR'].mean(),
+        "MCC": results_df['MCC'].mean(),
+        "ACC": results_df['ACC'].mean(),
+        "Precision": results_df['Precision'].mean(),
+        "Recall": results_df['Recall'].mean(),
+        "F1-Score": results_df['F1-Score'].mean(),
         "Time": f"{int(h)} hours, {int(m)} minutes, and {s:.2f} seconds",
     }
-    log_to_csv(config, metrics)
+    log_to_csv(config, avg_metrics)
+    
+    print("\n5-fold cross-validation completed successfully!")
