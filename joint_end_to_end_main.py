@@ -101,10 +101,10 @@ class JointVGAE_LDAGM(nn.Module):
         # pair_features shape: [batch_size, 2, features_per_node]
         # After flattening: [batch_size, 2 * features_per_node]
         # features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)
-        a_encoder_dim = 128  # Based on A_encoder file shape
-        network_num = 4  # Number of networks (from config or forward method parameter)
-        features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)  # 4 networks * (128 + 128) = 1024
-        ldagm_input_dim = 2 * features_per_node  # 2 nodes * 1024 = 2048
+        a_encoder_dim = config.A_ENCODER_DIM  # Based on A_encoder file shape
+        network_num = config.NETWORK_NUM 
+        features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)  
+        ldagm_input_dim = 2 * features_per_node
         self.ldagm = LDAGM(
             input_dimension=ldagm_input_dim,
             hidden_dimension=ldagm_hidden_dim,
