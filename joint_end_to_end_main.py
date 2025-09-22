@@ -100,11 +100,10 @@ class JointVGAE_LDAGM(nn.Module):
         # Input dimension: flattened features from pair_features tensor
         # pair_features shape: [batch_size, 2, features_per_node]
         # After flattening: [batch_size, 2 * features_per_node]
-        # features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)
-        a_encoder_dim = config.A_ENCODER_DIM  # Based on A_encoder file shape
+        # Actual feature dimension is 1024 based on runtime, so 512 per node # Based on A_encoder file shape
         network_num = config.NETWORK_NUM 
-        features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)  
-        ldagm_input_dim = 2 * features_per_node
+        features_per_node = network_num * 2 * vgae_embed_dim
+        ldagm_input_dim = 2 * features_per_node # Fixed based on actual runtime dimensions
         self.ldagm = LDAGM(
             input_dimension=ldagm_input_dim,
             hidden_dimension=ldagm_hidden_dim,
@@ -185,19 +184,7 @@ class JointVGAE_LDAGM(nn.Module):
         
         # Step 6: Extract features for link prediction following MyDataset pattern
         # Load A_encoder files for each network in the loop
-        A_encoders = []
-        for i in range(network_num):
-            A_encoder = np.load(
-                "./our_dataset/"
-                + dataset
-                + "/A_encoder/A_"
-                + str(fold + 1)
-                + "_"
-                + str(i + 1)
-                + ".npy"
-            )
-            A_encoders.append(torch.tensor(A_encoder, dtype=torch.float32, device=adj_matrix.device))
-        
+        list_mu, avg_network_loss = encoder_matrix_by_vgae(dataset, self.vgae, network_num, fold)
         # Get computational embeddings from VGAE
         node1_computational_embeddings = mu[node_pairs[:, 0]]
         node2_computational_embeddings = mu[node_pairs[:, 1]]
@@ -208,8 +195,8 @@ class JointVGAE_LDAGM(nn.Module):
         
         for i in range(network_num):
             # Concatenate computational embeddings with A_encoder features for each network
-            node1_features_net_i = torch.cat([node1_computational_embeddings, A_encoders[i][node_pairs[:, 0]]], dim=1)
-            node2_features_net_i = torch.cat([node2_computational_embeddings, A_encoders[i][node_pairs[:, 1]]], dim=1)
+            node1_features_net_i = torch.cat([node1_computational_embeddings, list_mu[i][node_pairs[:, 0]]], dim=1)
+            node2_features_net_i = torch.cat([node2_computational_embeddings, list_mu[i][node_pairs[:, 1]]], dim=1)
             
             node1_all_features.append(node1_features_net_i)
             node2_all_features.append(node2_features_net_i)
@@ -225,9 +212,52 @@ class JointVGAE_LDAGM(nn.Module):
         # Reshape from [batch_size, 2, features] to [batch_size, 2*features] for LDAGM
         pair_features_flattened = pair_features.view(pair_features.size(0), -1)
         link_predictions = self.ldagm(pair_features_flattened)
-        return reconstructed_adj, mu, log_var, link_predictions
+        return reconstructed_adj, mu, log_var, avg_network_loss, link_predictions
 
-def joint_loss_function(reconstructed_adj, original_adj, mu, log_var, 
+
+def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
+    """
+    Extract encoder matrices (mu) from VGAE for each network.
+    
+    Args:
+        dataset: Dataset name
+        vgae_model: VGAE model instance
+        network_num: Number of networks
+        fold: Current fold number
+        i: Network index (unused, kept for compatibility)
+        
+    Returns:
+        List of mu tensors from each network
+    """
+    list_mu = []
+    total_encoder_loss = 0.0
+    for i in range(network_num):
+        A = torch.Tensor(np.load('./our_dataset/' + dataset + '/A/A_' + str(fold + 1) + '_' + str(i + 1) + '.npy'))
+        adj_matrix = torch.tensor(A, dtype=torch.float32, device=config.DEVICE)
+        num_nodes = adj_matrix.shape[0]
+        features_input = torch.eye(num_nodes, device=adj_matrix.device)
+        reconstructed_adj, mu, log_var = vgae_model(adj_matrix, features_input)
+        # Compute reconstruction loss for this network
+        total_links = adj_matrix.sum().item()
+        pos_weight = torch.tensor(float(num_nodes**2 - total_links) / max(total_links, 1), device=device)
+        
+        reconstruction_loss = F.binary_cross_entropy_with_logits(
+            reconstructed_adj.view(-1), 
+            adj_matrix.view(-1), 
+            pos_weight=pos_weight
+        )
+        
+        # KL divergence loss
+        kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / num_nodes
+        
+        # Combine losses for this network
+        network_loss = reconstruction_loss + config.KL_WEIGHT * kl_loss
+        total_encoder_loss += network_loss
+        avg_loss = total_encoder_loss / network_num
+        list_mu.append(mu)
+    return list_mu, avg_loss
+
+def joint_loss_function(reconstructed_adj, original_adj, mu, log_var, avg_network_loss,
                        link_predictions, link_labels, num_nodes, pos_weight,
                        vgae_weight=1.0, link_weight=1.0, kl_weight=0.1):
     """
@@ -245,6 +275,7 @@ def joint_loss_function(reconstructed_adj, original_adj, mu, log_var,
         vgae_weight: Weight for VGAE reconstruction loss
         link_weight: Weight for link prediction loss
         kl_weight: Weight for KL divergence term
+        avg_network_loss: Average additional encoder loss from A_encoder matrices
         
     Returns:
         Combined loss value and individual loss components
@@ -268,15 +299,19 @@ def joint_loss_function(reconstructed_adj, original_adj, mu, log_var,
     total_loss = (
         vgae_weight * vgae_reconstruction_loss + 
         kl_weight * kl_loss + 
+        avg_network_loss +
         link_weight * link_prediction_loss
     )
     
-    return total_loss, {
+    # Add encoder loss if provided
+    loss_components = {
+        'total': total_loss.item(),
         'vgae_reconstruction': vgae_reconstruction_loss.item(),
         'kl_divergence': kl_loss.item(),
+        'avg_network_loss': avg_network_loss.item(),
         'link_prediction': link_prediction_loss.item(),
-        'total': total_loss.item()
     }
+    return total_loss, loss_components
 
 def log_hyperparameters():
     if not os.path.exists(os.path.dirname(config.LOG_FILE)):
@@ -373,7 +408,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             optimizer.zero_grad()
             
             # Forward pass with end-to-end GCN-Attention + VGAE + LDAGM
-            reconstructed_adj, mu, log_var, link_predictions = model(
+            reconstructed_adj, mu, log_var, avg_network_loss, link_predictions = model(
                 multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs, 
                 network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
             )
@@ -389,7 +424,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             # Compute joint loss using the dynamically generated adjacency matrix
             total_loss, loss_components = joint_loss_function(
                 reconstructed_adj, original_adj_reconstructed.detach(), mu, log_var,
-                link_predictions, batch_labels, num_nodes, pos_weight,
+                avg_network_loss, link_predictions, batch_labels, num_nodes, pos_weight,
                 vgae_weight, link_weight, kl_weight
             )
             
@@ -407,15 +442,16 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         loss_history.append(avg_losses)
         
         with open(config.LOG_FILE, 'a') as f:
-            f.write(f"Epoch {epoch+1}/{epochs}: Total Loss: {avg_losses['total']:.4f}, VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}, KL Divergence: {avg_losses['kl_divergence']:.4f}, Link Prediction: {avg_losses['link_prediction']:.4f}\n")
+            f.write(f"Epoch {epoch+1}/{epochs}: Total Loss: {avg_losses['total']:.4f}, Link Prediction: {avg_losses['link_prediction']:.4f}, VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}, KL Divergence: {avg_losses['kl_divergence']:.4f}, Average Network Loss: {avg_losses['avg_network_loss']:.4f}\n")
             f.write("-----------------------")
 
         if (epoch + 1) % 10 == 0:
             print(f"  Epoch {epoch+1}/{epochs}:")
             print(f"  Total Loss: {avg_losses['total']:.4f}")
+            print(f"  Link Prediction: {avg_losses['link_prediction']:.4f}")
             print(f"  VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}")
             print(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}")
-            print(f"  Link Prediction: {avg_losses['link_prediction']:.4f}")
+            print(f"  Average Network Loss: {avg_losses['avg_network_loss']:.4f}")
     
     return model, loss_history
 
@@ -452,7 +488,7 @@ def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_
             batch_node_pairs = batch_node_pairs.to(device)
             
             # Forward pass with end-to-end GCN-Attention integration
-            _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs,
+            _, _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs,
                                             network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET)
             
             # Apply sigmoid to get probabilities
