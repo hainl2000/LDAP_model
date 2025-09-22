@@ -1,0 +1,107 @@
+[
+  {
+    "config_id": 0,
+    "params": {
+      "GCN_HIDDEN_DIM": 64,
+      "FUSION_OUTPUT_DIM": 32,
+      "VGAE_HIDDEN_DIM": 32,
+      "VGAE_EMBED_DIM": 32,
+      "LDAGM_HIDDEN_DIM": 40,
+      "LDAGM_LAYERS": 5,
+      "DROP_RATE": 0.2,
+      "BATCH_SIZE": 32,
+      "EPOCHS": 15,
+      "LEARNING_RATE": 0.0001,
+      "WEIGHT_DECAY": 0.0001,
+      "VGAE_WEIGHT": 1.0,
+      "LINK_WEIGHT": 2.0,
+      "KL_WEIGHT": 0.1
+    },
+    "auc": 0.0,
+    "timestamp": "2025-09-19T18:07:21.820922"
+  },
+  {
+    "config_id": 1,
+    "params": {
+      "GCN_HIDDEN_DIM": 64,
+      "FUSION_OUTPUT_DIM": 32,
+      "VGAE_HIDDEN_DIM": 32,
+      "VGAE_EMBED_DIM": 32,
+      "LDAGM_HIDDEN_DIM": 40,
+      "LDAGM_LAYERS": 5,
+      "DROP_RATE": 0.2,
+      "BATCH_SIZE": 32,
+      "EPOCHS": 15,
+      "LEARNING_RATE": 0.0001,
+      "WEIGHT_DECAY": 0.0001,
+      "VGAE_WEIGHT": 1.0,
+      "LINK_WEIGHT": 2.0,
+      "KL_WEIGHT": 0.2
+    },
+    "auc": 0.0,
+    "timestamp": "2025-09-19T18:07:23.419200"
+  },
+  {
+    "config_id": 2,
+    "params": {
+      "GCN_HIDDEN_DIM": 64,
+      "FUSION_OUTPUT_DIM": 32,
+      "VGAE_HIDDEN_DIM": 32,
+      "VGAE_EMBED_DIM": 32,
+      "LDAGM_HIDDEN_DIM": 40,
+      "LDAGM_LAYERS": 5,
+      "DROP_RATE": 0.2,
+      "BATCH_SIZE": 32,
+      "EPOCHS": 15,
+      "LEARNING_RATE": 0.0001,
+      "WEIGHT_DECAY": 0.0001,
+      "VGAE_WEIGHT": 1.0,
+      "LINK_WEIGHT": 3.0,
+      "KL_WEIGHT": 0.1
+    },
+    "auc": 0.0,
+    "timestamp": "2025-09-19T18:07:25.012804"
+  },
+  {
+    "config_id": 3,
+    "params": {
+      "GCN_HIDDEN_DIM": 64,
+      "FUSION_OUTPUT_DIM": 32,
+      "VGAE_HIDDEN_DIM": 32,
+      "VGAE_EMBED_DIM": 32,
+      "LDAGM_HIDDEN_DIM": 40,
+      "LDAGM_LAYERS": 5,
+      "DROP_RATE": 0.2,
+      "BATCH_SIZE": 32,
+      "EPOCHS": 15,
+      "LEARNING_RATE": 0.0001,
+      "WEIGHT_DECAY": 0.0001,
+      "VGAE_WEIGHT": 1.0,
+      "LINK_WEIGHT": 3.0,
+      "KL_WEIGHT": 0.2
+    },
+    "auc": 0.0,
+    "timestamp": "2025-09-19T18:07:26.644593"
+  },
+  {
+    "config_id": 4,
+    "params": {
+      "GCN_HIDDEN_DIM": 64,
+      "FUSION_OUTPUT_DIM": 32,
+      "VGAE_HIDDEN_DIM": 32,
+      "VGAE_EMBED_DIM": 32,
+      "LDAGM_HIDDEN_DIM": 40,
+      "LDAGM_LAYERS": 5,
+      "DROP_RATE": 0.2,
+      "BATCH_SIZE": 32,
+      "EPOCHS": 15,
+      "LEARNING_RATE": 0.0005,
+      "WEIGHT_DECAY": 0.0001,
+      "VGAE_WEIGHT": 1.0,
+      "LINK_WEIGHT": 2.0,
+      "KL_WEIGHT": 0.1
+    },
+    "auc": 0.0,
+    "timestamp": "2025-09-19T18:07:28.243248"
+  }
+]
