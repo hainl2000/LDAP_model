@@ -9,7 +9,7 @@ NETWORK_NUM = 4  # Number of networks for A_encoder loading
 A_ENCODER_DIM = 128
 
 # Device
-DEVICE = "mps"  # "cuda" or "cpu"
+DEVICE = "mps"  # Options: "cuda", "mps", or "cpu" - will fallback to cpu if selected device is not available
 
 # Model Hyperparameters
 GCN_HIDDEN_DIM = 64
@@ -23,7 +23,7 @@ USE_AGGREGATE = True
 
 # Training Hyperparameters
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 20
 LEARNING_RATE = 0.0001704097001356655
 WEIGHT_DECAY = 4.381527985330247e-05
 

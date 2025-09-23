@@ -184,7 +184,7 @@ class JointVGAE_LDAGM(nn.Module):
         
         # Step 6: Extract features for link prediction following MyDataset pattern
         # Load A_encoder files for each network in the loop
-        list_mu, avg_network_loss = encoder_matrix_by_vgae(dataset, self.vgae, network_num, fold)
+        list_mu, avg_network_loss = encoder_matrix_by_vgae(dataset, self.vgae, network_num, fold, device=mu.device)
         # Get computational embeddings from VGAE
         node1_computational_embeddings = mu[node_pairs[:, 0]]
         node2_computational_embeddings = mu[node_pairs[:, 1]]
@@ -215,7 +215,7 @@ class JointVGAE_LDAGM(nn.Module):
         return reconstructed_adj, mu, log_var, avg_network_loss, link_predictions
 
 
-def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
+def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold, device=None):
     """
     Extract encoder matrices (mu) from VGAE for each network.
     
@@ -224,7 +224,7 @@ def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
         vgae_model: VGAE model instance
         network_num: Number of networks
         fold: Current fold number
-        i: Network index (unused, kept for compatibility)
+        device: Device to load tensors on (if None, uses config.DEVICE)
         
     Returns:
         List of mu tensors from each network
@@ -233,13 +233,13 @@ def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
     total_encoder_loss = 0.0
     for i in range(network_num):
         A = torch.Tensor(np.load('./our_dataset/' + dataset + '/A/A_' + str(fold + 1) + '_' + str(i + 1) + '.npy'))
-        adj_matrix = torch.tensor(A, dtype=torch.float32, device=config.DEVICE)
+        adj_matrix = torch.tensor(A, dtype=torch.float32, device=device if device is not None else config.DEVICE)
         num_nodes = adj_matrix.shape[0]
         features_input = torch.eye(num_nodes, device=adj_matrix.device)
         reconstructed_adj, mu, log_var = vgae_model(adj_matrix, features_input)
         # Compute reconstruction loss for this network
         total_links = adj_matrix.sum().item()
-        pos_weight = torch.tensor(float(num_nodes**2 - total_links) / max(total_links, 1), device=device)
+        pos_weight = torch.tensor(float(num_nodes**2 - total_links) / max(total_links, 1), device=adj_matrix.device)
         
         reconstruction_loss = F.binary_cross_entropy_with_logits(
             reconstructed_adj.view(-1), 
@@ -520,7 +520,13 @@ if __name__ == '__main__':
     
     # Configuration
     dataset = config.DATASET
-    device = torch.device(config.DEVICE) if torch.backends.mps.is_available() else torch.device("cpu")
+    # Proper device selection handling both CUDA and MPS
+    if config.DEVICE == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif config.DEVICE == "mps" and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
     
     # Initialize results storage for all folds
