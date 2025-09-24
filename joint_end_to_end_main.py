@@ -169,12 +169,12 @@ class JointVGAE_LDAGM(nn.Module):
             disease_similarity.detach().cpu().numpy(),
             mi_similarity.detach().cpu().numpy()
         )
-        adj_matrix = torch.tensor(adj_matrix_np, dtype=torch.float32, device=disease_fused_features.device)
+        adj_matrix = torch.tensor(adj_matrix_np, dtype=torch.float32, device=config.DEVICE)
         
         # Step 4: Add self-loops and create features
         num_nodes = adj_matrix.shape[0]
         adj_input = adj_matrix
-        features_input = torch.eye(num_nodes, device=adj_matrix.device)
+        features_input = torch.eye(num_nodes, device=config.DEVICE)
         
         # Step 5: VGAE forward pass
         reconstructed_adj, mu, log_var = self.vgae(adj_input, features_input)
@@ -235,7 +235,7 @@ def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
         A = torch.Tensor(np.load('./our_dataset/' + dataset + '/A/A_' + str(fold + 1) + '_' + str(i + 1) + '.npy'))
         adj_matrix = torch.tensor(A, dtype=torch.float32, device=config.DEVICE)
         num_nodes = adj_matrix.shape[0]
-        features_input = torch.eye(num_nodes, device=adj_matrix.device)
+        features_input = torch.eye(num_nodes, device=config.DEVICE)
         reconstructed_adj, mu, log_var = vgae_model(adj_matrix, features_input)
         # Compute reconstruction loss for this network
         total_links = adj_matrix.sum().item()
@@ -455,7 +455,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
     
     return model, loss_history
 
-def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, fold=0, device='cpu'):
+def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, fold=0, device=config.DEVICE):
     """
     Test function for joint model with GCN-Attention integration.
     
@@ -520,7 +520,15 @@ if __name__ == '__main__':
     
     # Configuration
     dataset = config.DATASET
-    device = torch.device(config.DEVICE) if torch.backends.mps.is_available() else torch.device("cpu")
+    # Device selection logic based on config and availability
+    if config.DEVICE == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif config.DEVICE == "mps" and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+        if config.DEVICE in ["cuda", "mps"]:
+            print(f"Warning: {config.DEVICE} not available, falling back to CPU")
     print(f"Using device: {device}")
     
     # Initialize results storage for all folds
