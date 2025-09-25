@@ -17,7 +17,6 @@ def get_device():
         return torch.device("cpu")
 
 DEVICE = get_device()
-print(f"Using device in construct multiview GCN GAT: {DEVICE}")
 # =============================================================================
 # Phần 1: GCN Feature Learning (Theo Eq. 7)
 # =============================================================================
