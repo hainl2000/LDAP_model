@@ -5,6 +5,19 @@ from torch_geometric.nn import GCNConv
 from torch_geometric.utils import dense_to_sparse
 import numpy as np
 import pandas as pd
+
+# Device configuration for CUDA support
+def get_device():
+    """Get the best available device (CUDA, MPS, or CPU)"""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+DEVICE = get_device()
+print(f"Using device in construct multiview GCN GAT: {DEVICE}")
 # =============================================================================
 # Phần 1: GCN Feature Learning (Theo Eq. 7)
 # =============================================================================
@@ -20,9 +33,13 @@ class GCNBlock(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x, adj_matrix):
+        # Ensure tensors are on the correct device
+        x = x.to(DEVICE)
+        adj_matrix = adj_matrix.to(DEVICE)
+        
         # Chuyển ma trận kề dày sang định dạng edge_index của PyG
         edge_index, _ = dense_to_sparse(adj_matrix)
-        edge_index = edge_index.to(x.device)
+        edge_index = edge_index.to(DEVICE)
         
         # Lớp 1
         x = self.conv1(x, edge_index)
@@ -213,8 +230,14 @@ class MultiViewFeatureExtractor(nn.Module):
             hidden_dim=gcn_hidden_dim,
             fusion_output_dim=fusion_output_dim
         )
+        
+        # Move model to device
+        self.to(DEVICE)
 
     def forward(self, adjacency_matrices_list):
+        # Ensure adjacency matrices are on the correct device
+        adjacency_matrices_list = [adj.to(DEVICE) for adj in adjacency_matrices_list]
+        
         # 1. Trích xuất feature từ mỗi view bằng GCN
         view_embeddings = [
             gcn(self.initial_features, adj) 
@@ -264,15 +287,3 @@ def concatenate(lnclen, dilen, milen, lnc_di, lnc_mi, mi_di, lncSiNet, diSiNet, 
     A[lnclen: lnclen + dilen, lnclen: lnclen + dilen] = diSiNet
     A[lnclen + dilen: , lnclen + dilen: ] = miSiNet
     return A
-
-def cal_fused_features(num_nodes, num_views, adjacency_matrices, gcn_hidden_dim=128, fusion_output_dim=128):
-    model = MultiViewFeatureExtractor(
-        num_nodes=num_nodes,
-        num_views=num_views,
-        gcn_hidden_dim=gcn_hidden_dim,
-        fusion_output_dim=fusion_output_dim
-    )
-    fused_features, attention_weights, individual_embeddings = model(adjacency_matrices)
-    similarity_matrix = reconstruct_similarity_matrix(fused_features)
-    # Detach from computation graph and convert to numpy for concatenate function
-    return similarity_matrix.detach().cpu().numpy()

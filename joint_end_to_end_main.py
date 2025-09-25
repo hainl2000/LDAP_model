@@ -239,7 +239,7 @@ def encoder_matrix_by_vgae(dataset, vgae_model, network_num, fold):
         reconstructed_adj, mu, log_var = vgae_model(adj_matrix, features_input)
         # Compute reconstruction loss for this network
         total_links = adj_matrix.sum().item()
-        pos_weight = torch.tensor(float(num_nodes**2 - total_links) / max(total_links, 1), device=device)
+        pos_weight = torch.tensor(float(num_nodes**2 - total_links) / max(total_links, 1), device=config.DEVICE)
         
         reconstruction_loss = F.binary_cross_entropy_with_logits(
             reconstructed_adj.view(-1), 
