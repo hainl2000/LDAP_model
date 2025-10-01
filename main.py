@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader, Dataset
 from construct_multiview_gcn_gat import concatenate, MultiViewFeatureExtractor, reconstruct_similarity_matrix
 from vgae_model import VGAE_Model
 from LDAGM import LDAGM
+from cagrad_optimizer import CAGradOptimizer, create_cagrad_optimizer
+from datetime import datetime
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -278,6 +280,66 @@ def joint_loss_function(reconstructed_adj, original_adj, mu, log_var,
         'total': total_loss.item()
     }
 
+def joint_loss_function_cagrad(reconstructed_adj, original_adj, mu, log_var, 
+                              link_predictions, link_labels, num_nodes, pos_weight,
+                              vgae_weight=1.0, link_weight=1.0, kl_weight=0.1):
+    """
+    Compute individual loss components for CAGrad optimization.
+    
+    This function returns individual loss tensors (not detached) for gradient computation
+    in the CAGrad algorithm, allowing for conflict-aware gradient descent.
+    
+    Args:
+        reconstructed_adj: Reconstructed adjacency matrix from VGAE
+        original_adj: Original adjacency matrix
+        mu: Mean of latent distribution
+        log_var: Log variance of latent distribution
+        link_predictions: Predictions from LDAGM
+        link_labels: True labels for link prediction
+        num_nodes: Number of nodes in the graph
+        pos_weight: Positive weight for binary cross-entropy
+        vgae_weight: Weight for VGAE reconstruction loss
+        link_weight: Weight for link prediction loss
+        kl_weight: Weight for KL divergence loss
+        
+    Returns:
+        Dictionary of individual loss tensors and statistics dictionary
+    """
+    # VGAE reconstruction loss
+    vgae_reconstruction_loss = F.binary_cross_entropy_with_logits(
+        reconstructed_adj.view(-1), 
+        original_adj.view(-1), 
+        pos_weight=pos_weight
+    )
+    
+    # KL divergence loss
+    kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / num_nodes
+    
+    # Link prediction loss
+    link_prediction_loss = F.binary_cross_entropy_with_logits(
+        link_predictions, link_labels
+    )
+    
+    # Apply weights to individual losses for CAGrad
+    weighted_losses = {
+        'vgae_reconstruction': vgae_weight * vgae_reconstruction_loss,
+        'kl_divergence': kl_weight * kl_loss,
+        'link_prediction': link_weight * link_prediction_loss
+    }
+    
+    # Combined loss for comparison
+    total_loss = sum(weighted_losses.values())
+    
+    # Statistics for logging (detached values)
+    loss_stats = {
+        'vgae_reconstruction': vgae_reconstruction_loss.item(),
+        'kl_divergence': kl_loss.item(),
+        'link_prediction': link_prediction_loss.item(),
+        'total': total_loss.item()
+    }
+    
+    return weighted_losses, loss_stats
+
 def log_hyperparameters():
     if not os.path.exists(os.path.dirname(config.LOG_FILE)):
         os.makedirs(os.path.dirname(config.LOG_FILE))
@@ -418,6 +480,185 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             print(f"  Link Prediction: {avg_losses['link_prediction']:.4f}")
     
     return model, loss_history
+
+
+def joint_train_cagrad(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data, 
+                      lnc_di_interaction, lnc_mi_interaction, mi_di_interaction,
+                      fold=0, batch_size=config.BATCH_SIZE, epochs=config.EPOCHS, lr=config.LEARNING_RATE, 
+                      weight_decay=config.WEIGHT_DECAY, device=config.DEVICE, 
+                      vgae_weight=config.VGAE_WEIGHT, link_weight=config.LINK_WEIGHT, kl_weight=config.KL_WEIGHT,
+                      vgae_hidden_dim=config.VGAE_HIDDEN_DIM, vgae_embed_dim=config.VGAE_EMBED_DIM, 
+                      ldagm_hidden_dim=config.LDAGM_HIDDEN_DIM, ldagm_layers=config.LDAGM_LAYERS):
+    """
+    Joint end-to-end training function with CAGrad optimization for conflict-aware gradient descent.
+    
+    This function uses the CAGrad algorithm to handle conflicting gradients between the three
+    loss components: VGAE reconstruction, KL divergence, and link prediction losses.
+    
+    Args:
+        num_lnc: Number of lncRNA nodes
+        num_diseases: Number of disease nodes
+        num_mi: Number of miRNA nodes
+        train_dataset: Training dataset
+        multi_view_data: Dictionary containing multi-view adjacency matrices
+        lnc_di_interaction: lncRNA-disease interaction matrix
+        lnc_mi_interaction: lncRNA-miRNA interaction matrix
+        mi_di_interaction: miRNA-disease interaction matrix
+        batch_size: Batch size for training
+        epochs: Number of training epochs
+        lr: Learning rate
+        weight_decay: Weight decay
+        device: Training device
+        vgae_weight: Weight for VGAE loss
+        link_weight: Weight for link prediction loss
+        kl_weight: Weight for KL divergence
+        vgae_hidden_dim: VGAE hidden dimension
+        vgae_embed_dim: VGAE embedding dimension
+        ldagm_hidden_dim: LDAGM hidden dimension
+        ldagm_layers: Number of LDAGM layers
+        
+    Returns:
+        Trained model, loss history, and CAGrad statistics
+    """
+    
+    # Convert interactions to numpy for concatenation
+    lnc_di_np = lnc_di_interaction.detach().cpu().numpy()
+    lnc_mi_np = lnc_mi_interaction.detach().cpu().numpy()
+    mi_di_np = mi_di_interaction.detach().cpu().numpy()
+
+    # Model parameters
+    num_nodes = num_lnc + num_diseases + num_mi
+    in_dimension = num_lnc + num_diseases + num_mi
+    total_links = (lnc_di_np.sum() + lnc_mi_np.sum() + mi_di_np.sum())*2 + num_lnc + num_diseases + num_mi
+    pos_weight = torch.tensor(float(num_nodes**2 - total_links) / total_links, device=device)
+
+    # Initialize joint model
+    model = JointVGAE_LDAGM(
+        num_lnc=num_lnc,
+        num_diseases=num_diseases,
+        num_mi=num_mi,
+        vgae_in_dim=in_dimension,
+        vgae_hidden_dim=vgae_hidden_dim,
+        vgae_embed_dim=vgae_embed_dim,
+        ldagm_hidden_dim=ldagm_hidden_dim,
+        ldagm_layers=ldagm_layers,
+        drop_rate=config.DROP_RATE,
+        use_aggregate=config.USE_AGGREGATE,
+        gcn_hidden_dim=config.GCN_HIDDEN_DIM,
+        fusion_output_dim=config.FUSION_OUTPUT_DIM
+    )
+    
+    model = model.to(device)
+    lnc_di_interaction = lnc_di_interaction.to(device)
+    lnc_mi_interaction = lnc_mi_interaction.to(device)
+    mi_di_interaction = mi_di_interaction.to(device)
+    
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
+    # Create CAGrad optimizer
+    cagrad_optimizer = create_cagrad_optimizer(
+        model=model,
+        lr=lr,
+        weight_decay=weight_decay,
+        alpha=config.CAGRAD_ALPHA,
+        rescale=config.CAGRAD_RESCALE,
+        conflict_threshold=config.CAGRAD_CONFLICT_THRESHOLD,
+        base_optimizer=config.CAGRAD_BASE_OPTIMIZER,
+        task_priorities=config.CAGRAD_TASK_PRIORITIES
+    )
+    
+    loss_history = []
+    cagrad_stats_history = []
+    
+    print(f"  Using CAGrad optimization with alpha={config.CAGRAD_ALPHA}, "
+          f"conflict_threshold={config.CAGRAD_CONFLICT_THRESHOLD}")
+    
+    for epoch in range(epochs):
+        model.train()
+        epoch_losses = []
+        epoch_cagrad_stats = []
+        
+        for batch_node_pairs, batch_labels in dataloader:
+            batch_node_pairs = batch_node_pairs.to(device)
+            batch_labels = batch_labels.to(device)
+            
+            # Forward pass with end-to-end GCN-Attention + VGAE + LDAGM
+            reconstructed_adj, mu, log_var, link_predictions = model(
+                multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs, 
+                network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
+            )
+            
+            # Get the original adjacency matrix from the model's forward pass
+            with torch.no_grad():
+                original_adj_reconstructed, _, _ = model(
+                    multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, None,
+                    network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
+                )
+            
+            # Compute individual loss components for CAGrad
+            individual_losses, loss_stats = joint_loss_function_cagrad(
+                reconstructed_adj, original_adj_reconstructed.detach(), mu, log_var,
+                link_predictions, batch_labels, num_nodes, pos_weight,
+                vgae_weight, link_weight, kl_weight
+            )
+            
+            # Apply CAGrad optimization step
+            conflict_info = cagrad_optimizer.step(
+                losses=individual_losses,
+                model=model,
+                retain_graph=False
+            )
+            
+            epoch_losses.append(loss_stats)
+            epoch_cagrad_stats.append(conflict_info)
+        
+        # Average losses and CAGrad statistics for the epoch
+        avg_losses = {
+            key: np.mean([loss[key] for loss in epoch_losses])
+            for key in epoch_losses[0].keys()
+        }
+        
+        # Average CAGrad statistics
+        avg_cagrad_stats = {
+            'has_conflicts': np.mean([stats['has_conflicts'] for stats in epoch_cagrad_stats]),
+            'n_conflicts': np.mean([stats['n_conflicts'] for stats in epoch_cagrad_stats]),
+            'avg_similarity': np.mean([
+                np.mean(list(stats['similarities'].values())) 
+                for stats in epoch_cagrad_stats if stats['similarities']
+            ]) if any(stats['similarities'] for stats in epoch_cagrad_stats) else 0.0
+        }
+        
+        loss_history.append(avg_losses)
+        cagrad_stats_history.append(avg_cagrad_stats)
+        
+        # Enhanced logging with CAGrad information
+        with open(config.LOG_FILE, 'a') as f:
+            f.write(f"Epoch {epoch+1}/{epochs}: Total Loss: {avg_losses['total']:.4f}, "
+                   f"VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}, "
+                   f"KL Divergence: {avg_losses['kl_divergence']:.4f}, "
+                   f"Link Prediction: {avg_losses['link_prediction']:.4f}, "
+                   f"Conflicts: {avg_cagrad_stats['n_conflicts']:.2f}, "
+                   f"Avg Similarity: {avg_cagrad_stats['avg_similarity']:.4f}\n")
+            f.write("-----------------------\n")
+
+        if (epoch + 1) % 10 == 0:
+            print(f"  Epoch {epoch+1}/{epochs}:")
+            print(f"  Total Loss: {avg_losses['total']:.4f}")
+            print(f"  VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}")
+            print(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}")
+            print(f"  Link Prediction: {avg_losses['link_prediction']:.4f}")
+            print(f"  CAGrad Conflicts: {avg_cagrad_stats['n_conflicts']:.2f}")
+            print(f"  Avg Gradient Similarity: {avg_cagrad_stats['avg_similarity']:.4f}")
+    
+    # Get final CAGrad statistics
+    final_cagrad_stats = cagrad_optimizer.get_conflict_statistics()
+    
+    print(f"  CAGrad Training Summary:")
+    print(f"  - Total conflict steps: {final_cagrad_stats.get('conflict_steps', 0)}")
+    print(f"  - Conflict ratio: {final_cagrad_stats.get('conflict_ratio', 0.0):.3f}")
+    print(f"  - Avg conflicts per step: {final_cagrad_stats.get('avg_conflicts_per_step', 0.0):.2f}")
+    
+    return model, loss_history, cagrad_stats_history, final_cagrad_stats
 
 def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, fold=0, device='cpu'):
     """
@@ -584,19 +825,35 @@ if __name__ == '__main__':
         
         print(f"Starting joint end-to-end training for fold {fold + 1}...")
         
-        # Joint training with end-to-end GCN-Attention integration
-        trained_model, loss_history = joint_train(
-            num_lnc=num_lnc,
-            num_diseases=num_diseases,
-            num_mi=num_mi,
-            train_dataset=train_dataset,
-            multi_view_data=multi_view_data,
-            lnc_di_interaction=lnc_di_tensor,
-            lnc_mi_interaction=lnc_mi_tensor,
-            mi_di_interaction=mi_di_tensor,
-            fold=fold,
-            device=device
-        )
+        # Train the joint model - use CAGrad if enabled
+        if config.USE_CAGRAD:
+            print(f"Using CAGrad optimization with alpha={config.CAGRAD_ALPHA}")
+            trained_model, loss_history, cagrad_stats, final_cagrad_stats = joint_train_cagrad(
+                num_lnc=num_lnc,
+                num_diseases=num_diseases,
+                num_mi=num_mi,
+                train_dataset=train_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                device=device
+            )
+        else:
+            print("Using standard Adam optimization")
+            trained_model, loss_history = joint_train(
+                num_lnc=num_lnc,
+                num_diseases=num_diseases,
+                num_mi=num_mi,
+                train_dataset=train_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                device=device
+            )
     
         print(f"\nTesting joint model for fold {fold + 1}...")
         
@@ -696,6 +953,7 @@ if __name__ == '__main__':
         "Recall": results_df['Recall'].mean(),
         "F1-Score": results_df['F1-Score'].mean(),
         "Time": f"{int(h)} hours, {int(m)} minutes, and {s:.2f} seconds",
+        "Current Time": datetime.now().strftime("%H:%M:%S")
     }
     log_to_csv(config, avg_metrics)
     
