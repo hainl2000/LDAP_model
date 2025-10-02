@@ -12,7 +12,7 @@ NETWORK_NUM = 4  # Number of networks for A_encoder loading
 A_ENCODER_DIM = 128  # Dimension of A_encoder features
 
 # Device Configuration
-DEVICE = "mps"  # Options: "cuda", "mps", "cpu"
+DEVICE = "cuda"  # Options: "cuda", "mps", "cpu"
 
 # ============================================================================
 # Model Architecture Hyperparameters
