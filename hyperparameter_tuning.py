@@ -60,7 +60,7 @@ HYPERPARAMETER_SPACE = {
     
     # Categorical parameters
     'BATCH_SIZE': [16, 32, 64],
-    'EPOCHS': [100],  # Fixed to 100
+    'EPOCHS': [200],  # Fixed to 100
     
     # Loss weights - continuous
     'VGAE_WEIGHT': (0.5, 1.0),
