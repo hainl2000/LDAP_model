@@ -329,7 +329,8 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
                weight_decay=config.WEIGHT_DECAY, device=config.DEVICE, 
                vgae_weight=config.VGAE_WEIGHT, link_weight=config.LINK_WEIGHT, kl_weight=config.KL_WEIGHT,
                vgae_hidden_dim=config.VGAE_HIDDEN_DIM, vgae_embed_dim=config.VGAE_EMBED_DIM, 
-               ldagm_hidden_dim=config.LDAGM_HIDDEN_DIM, ldagm_layers=config.LDAGM_LAYERS):
+               ldagm_hidden_dim=config.LDAGM_HIDDEN_DIM, ldagm_layers=config.LDAGM_LAYERS,
+               patience=10, min_delta=1e-4):
     """
     Joint end-to-end training function with GCN-Attention integration.
     Creates model internally and handles all training setup.
@@ -355,6 +356,8 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         vgae_embed_dim: VGAE embedding dimension
         ldagm_hidden_dim: LDAGM hidden dimension
         ldagm_layers: Number of LDAGM layers
+        patience: Number of epochs with no improvement before stopping (default: 10)
+        min_delta: Minimum change in loss to qualify as an improvement (default: 1e-4)
         
     Returns:
         Trained model and loss history
@@ -396,6 +399,8 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     loss_history = []
+    best_loss = float('inf')
+    patience_counter = 0
     
     for epoch in range(epochs):
         model.train()
@@ -440,6 +445,20 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             for key in epoch_losses[0].keys()
         }
         loss_history.append(avg_losses)
+        
+        # Early stopping check
+        current_loss = avg_losses['total']
+        if current_loss < best_loss - min_delta:
+            best_loss = current_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f"  Early stopping triggered at epoch {epoch+1}/{epochs}")
+            with open(config.LOG_FILE, 'a') as f:
+                f.write(f"Early stopping at epoch {epoch+1}, best loss: {best_loss:.4f}\n")
+            break
         
         with open(config.LOG_FILE, 'a') as f:
             f.write(f"Epoch {epoch+1}/{epochs}: Total Loss: {avg_losses['total']:.4f}, Link Prediction: {avg_losses['link_prediction']:.4f}, VGAE Reconstruction: {avg_losses['vgae_reconstruction']:.4f}, KL Divergence: {avg_losses['kl_divergence']:.4f}, Average Network Loss: {avg_losses['avg_network_loss']:.4f}\n")
