@@ -47,13 +47,13 @@ HYPERPARAMETER_SPACE = {
     'VGAE_HIDDEN_DIM': [32, 64, 128],
     'VGAE_EMBED_DIM': [32, 64, 128],
     'LDAGM_HIDDEN_DIM': [30, 40, 50],
-    'LDAGM_LAYERS': [3, 4, 5],
+    'LDAGM_LAYERS': [2, 3, 4],
     'USE_AGGREGATE': [True],  # Fixed to True
     
     # Continuous parameters
     'DROP_RATE': (0.1, 0.4),  # min, max
-    'LEARNING_RATE': (1e-5, 1e-2),  # min, max (log scale)
-    'WEIGHT_DECAY': (1e-6, 1e-3),  # min, max (log scale)
+    'LEARNING_RATE': (1e-4, 5e-4),  # min, max (log scale)
+    'WEIGHT_DECAY': (1e-4, 5e-4),  # min, max (log scale)
     
     # Categorical parameters
     'BATCH_SIZE': [16, 32, 64],
