@@ -59,8 +59,11 @@ class JointVGAE_LDAGM(nn.Module):
     """
     def __init__(self, num_lnc, num_diseases, num_mi, vgae_in_dim, vgae_hidden_dim, vgae_embed_dim, 
                  ldagm_hidden_dim, ldagm_layers, drop_rate=config.DROP_RATE, use_aggregate=config.USE_AGGREGATE, 
-                 gcn_hidden_dim=config.GCN_HIDDEN_DIM, fusion_output_dim=config.FUSION_OUTPUT_DIM):
+                 gcn_hidden_dim=config.GCN_HIDDEN_DIM, fusion_output_dim=config.FUSION_OUTPUT_DIM, device=None):
         super(JointVGAE_LDAGM, self).__init__()
+        
+        # Store device
+        self.device = device if device is not None else torch.device("cpu")
         
         # Store dimensions for multi-view processing
         self.num_lnc = num_lnc
@@ -72,19 +75,22 @@ class JointVGAE_LDAGM(nn.Module):
         def create_disease_extractor():
             return MultiViewFeatureExtractor(
                 num_nodes=num_diseases, num_views=2, 
-                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim
+                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim,
+                device=self.device
             )
         
         def create_lnc_extractor():
             return MultiViewFeatureExtractor(
                 num_nodes=num_lnc, num_views=2, 
-                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim
+                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim,
+                device=self.device
             )
         
         def create_mi_extractor():
             return MultiViewFeatureExtractor(
                 num_nodes=num_mi, num_views=2, 
-                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim
+                gcn_hidden_dim=gcn_hidden_dim, fusion_output_dim=fusion_output_dim,
+                device=self.device
             )
         
         # Parallel initialization of feature extractors
@@ -349,7 +355,8 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
         drop_rate=config.DROP_RATE,
         use_aggregate=config.USE_AGGREGATE,
         gcn_hidden_dim=config.GCN_HIDDEN_DIM,
-        fusion_output_dim=config.FUSION_OUTPUT_DIM
+        fusion_output_dim=config.FUSION_OUTPUT_DIM,
+        device=device
     )
     
     model = model.to(device)

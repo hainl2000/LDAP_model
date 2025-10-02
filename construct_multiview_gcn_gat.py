@@ -16,6 +16,7 @@ def get_device():
     else:
         return torch.device("cpu")
 
+# Default device (can be overridden by passing device parameter to classes)
 DEVICE = get_device()
 # =============================================================================
 # Phần 1: GCN Feature Learning (Theo Eq. 7)
@@ -25,20 +26,21 @@ class GCNBlock(nn.Module):
     Một khối GCN 2 lớp độc lập cho một view, bám sát mô tả 2.3.1.
     Sử dụng GCNConv của PyG để triển khai đúng công thức (7).
     """
-    def __init__(self, in_channels, hidden_channels=128, dropout_rate=0.1):
+    def __init__(self, in_channels, hidden_channels=128, dropout_rate=0.1, device=None):
         super(GCNBlock, self).__init__()
+        self.device = device if device is not None else DEVICE
         self.conv1 = GCNConv(in_channels, hidden_channels)
         self.conv2 = GCNConv(hidden_channels, hidden_channels)
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x, adj_matrix):
         # Ensure tensors are on the correct device
-        x = x.to(DEVICE)
-        adj_matrix = adj_matrix.to(DEVICE)
+        x = x.to(self.device)
+        adj_matrix = adj_matrix.to(self.device)
         
         # Chuyển ma trận kề dày sang định dạng edge_index của PyG
         edge_index, _ = dense_to_sparse(adj_matrix)
-        edge_index = edge_index.to(DEVICE)
+        edge_index = edge_index.to(self.device)
         
         # Lớp 1
         x = self.conv1(x, edge_index)
@@ -212,13 +214,14 @@ class MultiViewFeatureExtractor(nn.Module):
     #         fusion_output_dim=fusion_output_dim
     #     )
 
-    def __init__(self, num_nodes, num_views, gcn_hidden_dim=128, fusion_output_dim=128):
+    def __init__(self, num_nodes, num_views, gcn_hidden_dim=128, fusion_output_dim=128, device=None):
         super(MultiViewFeatureExtractor, self).__init__()
         
+        self.device = device if device is not None else DEVICE
         self.initial_features = nn.Parameter(torch.eye(num_nodes), requires_grad=False)
         
         self.gcn_blocks = nn.ModuleList([
-            GCNBlock(in_channels=num_nodes, hidden_channels=gcn_hidden_dim)
+            GCNBlock(in_channels=num_nodes, hidden_channels=gcn_hidden_dim, device=self.device)
             for _ in range(num_views)
         ])
         
@@ -231,11 +234,11 @@ class MultiViewFeatureExtractor(nn.Module):
         )
         
         # Move model to device
-        self.to(DEVICE)
+        self.to(self.device)
 
     def forward(self, adjacency_matrices_list):
         # Ensure adjacency matrices are on the correct device
-        adjacency_matrices_list = [adj.to(DEVICE) for adj in adjacency_matrices_list]
+        adjacency_matrices_list = [adj.to(self.device) for adj in adjacency_matrices_list]
         
         # 1. Trích xuất feature từ mỗi view bằng GCN
         view_embeddings = [
