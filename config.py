@@ -9,7 +9,7 @@ NETWORK_NUM = 4  # Number of networks for A_encoder loading
 A_ENCODER_DIM = 128
 
 # Device
-DEVICE = "mps"  # "cuda" or "cpu"
+DEVICE = "cuda"  # "cuda", "mps", or "cpu"
 
 # Model Hyperparameters - Best Hyperparameters Applied
 GCN_HIDDEN_DIM = 128

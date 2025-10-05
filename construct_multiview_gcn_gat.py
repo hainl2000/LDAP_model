@@ -6,12 +6,14 @@ from torch_geometric.utils import dense_to_sparse
 import numpy as np
 import pandas as pd
 
-# Device configuration for CUDA support
+# Device configuration - import from config to ensure consistency
+import config
+
 def get_device():
-    """Get the best available device (CUDA, MPS, or CPU)"""
-    if torch.cuda.is_available():
+    """Get device from config with fallback logic"""
+    if config.DEVICE == "cuda" and torch.cuda.is_available():
         return torch.device("cuda")
-    elif torch.backends.mps.is_available():
+    elif config.DEVICE == "mps" and torch.backends.mps.is_available():
         return torch.device("mps")
     else:
         return torch.device("cpu")
@@ -215,7 +217,8 @@ class MultiViewFeatureExtractor(nn.Module):
     def __init__(self, num_nodes, num_views, gcn_hidden_dim=128, fusion_output_dim=128):
         super(MultiViewFeatureExtractor, self).__init__()
         
-        self.initial_features = nn.Parameter(torch.eye(num_nodes), requires_grad=False)
+        # Create initial_features directly on the target device
+        self.initial_features = nn.Parameter(torch.eye(num_nodes, device=DEVICE), requires_grad=False)
         
         self.gcn_blocks = nn.ModuleList([
             GCNBlock(in_channels=num_nodes, hidden_channels=gcn_hidden_dim)
@@ -230,7 +233,7 @@ class MultiViewFeatureExtractor(nn.Module):
             fusion_output_dim=fusion_output_dim
         )
         
-        # Move model to device
+        # Move entire model to device to ensure all parameters are on the same device
         self.to(DEVICE)
 
     def forward(self, adjacency_matrices_list):
