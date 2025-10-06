@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 from construct_multiview_gcn_gat import concatenate, MultiViewFeatureExtractor, reconstruct_similarity_matrix
 from vgae_model import VGAE_Model
 from LDAGM import LDAGM
+from focal_loss import create_focal_loss
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -190,7 +191,7 @@ class JointVGAE_LDAGM(nn.Module):
             A_encoder = np.load(
                 "./our_dataset/"
                 + dataset
-                + "/Temp_A_encoder/A_"
+                + "/10_A_encoder/A_"
                 + str(fold + 1)
                 + "_"
                 + str(i + 1)
@@ -259,10 +260,20 @@ def joint_loss_function(reconstructed_adj, original_adj, mu, log_var,
     # KL divergence loss
     kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / num_nodes
     
-    # Link prediction loss
-    link_prediction_loss = F.binary_cross_entropy_with_logits(
-        link_predictions, link_labels
-    )
+    # Link prediction loss with Focal Loss for class imbalance handling
+    if config.USE_FOCAL_LOSS:
+        focal_loss_fn = create_focal_loss(
+            alpha=config.FOCAL_ALPHA,
+            gamma=config.FOCAL_GAMMA,
+            adaptive=config.FOCAL_ADAPTIVE,
+            reduction=config.FOCAL_REDUCTION
+        )
+        link_prediction_loss = focal_loss_fn(link_predictions, link_labels)
+    else:
+        # Fallback to standard BCE loss
+        link_prediction_loss = F.binary_cross_entropy_with_logits(
+            link_predictions, link_labels
+        )
     
     # Combined loss
     total_loss = (

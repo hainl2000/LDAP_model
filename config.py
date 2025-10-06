@@ -32,7 +32,7 @@ USE_AGGREGATE = True
 
 # Training Hyperparameters
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 5
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 1e-4
 #EPOCHS = [1,2,3,4,5,6,7,8,9,10]
@@ -40,6 +40,26 @@ WEIGHT_DECAY = 1e-4
 VGAE_WEIGHT = 1.0
 LINK_WEIGHT = 3.0
 KL_WEIGHT = 0.1
+
+# CAGrad Configuration
+USE_CAGRAD = True
+CAGRAD_ALPHA = 0.5
+CAGRAD_RESCALE = 1
+CAGRAD_CONFLICT_THRESHOLD = 0.1
+
+# CAGrad Task Priorities (for multi-task learning)
+CAGRAD_TASK_PRIORITIES = {
+    "vgae_recon": 1.0,    # VGAE reconstruction loss priority
+    "kl_div": 1.0,        # KL divergence loss priority  
+    "link_pred": 2.0      # Link prediction loss priority (higher for prediction task)
+}
+
+# Focal Loss Configuration (for class imbalance in lncRNA-disease prediction)
+USE_FOCAL_LOSS = True
+FOCAL_ALPHA = 0.85        # Weight for positive class (higher for severe imbalance)
+FOCAL_GAMMA = 2.5         # Focusing parameter (higher focuses on hard examples)
+FOCAL_ADAPTIVE = False    # Whether to use adaptive alpha based on batch distribution
+FOCAL_REDUCTION = 'mean'  # Reduction method: 'mean', 'sum', or 'none'
 
 # Training Configuration
 # GRAD_CLIP = 1.0
