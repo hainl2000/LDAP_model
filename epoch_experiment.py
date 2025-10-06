@@ -6,14 +6,28 @@ Epochs to test: 1, 2, 3, 4, 5, 10, 15, 20, 30, 50, 100
 Each epoch configuration runs 10 times for statistical significance.
 """
 
-import subprocess
+import torch
 import numpy as np
 import pandas as pd
-import json
+import copy
 import time
 from datetime import datetime
 import os
 import sys
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    matthews_corrcoef,
+)
+
+# Import from main.py
+from main import JointVGAE_LDAGM, JointDataset, joint_train, joint_test
+import config
 
 # Experiment configuration
 EPOCHS_TO_TEST = [1, 2, 3, 4, 5, 10, 15, 20, 30, 50, 100]
@@ -46,42 +60,8 @@ def restore_config_backup():
     # You might want to backup config.py first
     pass
 
-def parse_output_for_metrics(output):
-    """
-    Parse the output from main.py to extract metrics.
-    Returns a dictionary with AUC, AUPR, ACC, etc.
-    """
-    metrics = {
-        'AUC': None,
-        'AUPR': None,
-        'MCC': None,
-        'ACC': None,
-        'Precision': None,
-        'Recall': None,
-        'F1-Score': None
-    }
-    
-    try:
-        # Look for lines like "AUC: 0.xxxx ± 0.xxxx"
-        lines = output.split('\n')
-        for line in lines:
-            for metric_name in metrics.keys():
-                if metric_name in line and '±' in line:
-                    # Extract the mean value (before ±)
-                    parts = line.split(':')
-                    if len(parts) >= 2:
-                        value_part = parts[1].strip().split('±')[0].strip()
-                        try:
-                            metrics[metric_name] = float(value_part)
-                        except ValueError:
-                            pass
-    except Exception as e:
-        print(f"Error parsing output: {e}")
-    
-    return metrics
-
-def run_main_once(epoch_value, run_number):
-    """Run main.py once and return the results"""
+def run_main_once(epoch_value, run_number, dataset='dataset2'):
+    """Run training and testing using main.py functions directly"""
     print(f"\n{'='*60}")
     print(f"Epoch: {epoch_value} | Run: {run_number}/{RUNS_PER_EPOCH}")
     print(f"{'='*60}")
@@ -89,22 +69,163 @@ def run_main_once(epoch_value, run_number):
     start_time = time.time()
     
     try:
-        # Run main.py and capture output
-        result = subprocess.run(
-            [sys.executable, 'main.py'],
-            capture_output=True,
-            text=True,
-            timeout=7200  # 2 hour timeout
-        )
+        # Get device
+        if config.DEVICE == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif config.DEVICE == "mps" and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+        
+        print(f"Using device: {device}")
+        
+        # Run 5-fold cross-validation
+        fold_metrics = []
+        
+        for fold in range(config.TOTAL_FOLDS):
+            print(f"  Fold {fold + 1}/5...", end=' ')
+            fold_start = time.time()
+            
+            # Load data indices
+            positive5foldsidx = np.load(
+                f"./our_dataset/{dataset}/index/positive5foldsidx.npy",
+                allow_pickle=True,
+            )
+            negative5foldsidx = np.load(
+                f"./our_dataset/{dataset}/index/negative5foldsidx.npy",
+                allow_pickle=True,
+            )
+            positive_ij = np.load(f"./our_dataset/{dataset}/index/positive_ij.npy")
+            negative_ij = np.load(f"./our_dataset/{dataset}/index/negative_ij.npy")
+            
+            train_positive_ij = positive_ij[positive5foldsidx[fold]["train"]]
+            train_negative_ij = negative_ij[negative5foldsidx[fold]["train"]]
+            test_positive_ij = positive_ij[positive5foldsidx[fold]["test"]]
+            test_negative_ij = negative_ij[negative5foldsidx[fold]["test"]]
+
+            # Load similarity matrices
+            di_semantic_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/di_semantic_similarity.npy")
+            di_gip_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/di_gip_similarity_fold_{fold+1}.npy")
+            lnc_gip_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/lnc_gip_similarity_fold_{fold+1}.npy")
+            lnc_func_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/lnc_func_similarity_fold_{fold+1}.npy")
+            mi_gip_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/mi_gip_similarity.npy")
+            mi_func_similarity = np.load(f"./our_dataset/{dataset}/multi_similarities/mi_func_similarity.npy")
+            
+            # Load interaction matrices
+            lnc_di = pd.read_csv(f'./our_dataset/{dataset}/interaction/lnc_di.csv')
+            lnc_di.set_index('0', inplace=True)
+            lnc_di = lnc_di.values
+            lnc_di_copy = copy.copy(lnc_di)
+            
+            lnc_mi = pd.read_csv(f'./our_dataset/{dataset}/interaction/lnc_mi.csv', index_col='0').values
+            mi_di = pd.read_csv(f'./our_dataset/{dataset}/interaction/mi_di.csv')
+            mi_di.set_index('0', inplace=True)
+            mi_di = mi_di.values
+            
+            # Get dimensions
+            num_diseases = di_semantic_similarity.shape[0]
+            num_lnc = lnc_gip_similarity.shape[0]
+            num_mi = mi_gip_similarity.shape[0]
+            lncRNALen = num_lnc
+            
+            # Remove test edges from training adjacency matrix
+            for ij in positive_ij[positive5foldsidx[fold]['test']]:
+                lnc_di_copy[ij[0], ij[1] - lncRNALen] = 0
+            
+            # Create adjacency matrices for each entity type
+            disease_adjacency_matrices = [
+                torch.tensor(di_semantic_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(di_gip_similarity, dtype=torch.float32).to(device)
+            ]
+            lnaRNA_adjacency_matrices = [
+                torch.tensor(lnc_gip_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(lnc_func_similarity, dtype=torch.float32).to(device)
+            ]
+            miRNA_adjacency_matrices = [
+                torch.tensor(mi_gip_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
+            ]
+            
+            # Create datasets
+            train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
+            test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
+            
+            # Prepare multi-view data structure
+            multi_view_data = {
+                'disease': disease_adjacency_matrices,
+                'lnc': lnaRNA_adjacency_matrices,
+                'mi': miRNA_adjacency_matrices
+            }
+            
+            # Prepare interaction matrices as tensors
+            lnc_di_tensor = torch.tensor(lnc_di_copy, dtype=torch.float32).to(device)
+            lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
+            mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
+            
+            # Train model
+            trained_model, loss_history = joint_train(
+                num_lnc=num_lnc,
+                num_diseases=num_diseases,
+                num_mi=num_mi,
+                train_dataset=train_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                device=device
+            )
+            
+            # Test model
+            test_labels, test_predictions = joint_test(
+                model=trained_model,
+                test_dataset=test_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                batch_size=config.BATCH_SIZE,
+                device=device
+            )
+            
+            # Calculate metrics
+            AUC = roc_auc_score(test_labels, test_predictions)
+            precision, recall, _ = precision_recall_curve(test_labels, test_predictions)
+            AUPR = auc(recall, precision)
+            
+            binary_preds = (test_predictions > 0.5).astype(int)
+            MCC = matthews_corrcoef(test_labels, binary_preds)
+            ACC = accuracy_score(test_labels, binary_preds)
+            P = precision_score(test_labels, binary_preds)
+            R = recall_score(test_labels, binary_preds)
+            F1 = f1_score(test_labels, binary_preds)
+            
+            fold_metrics.append({
+                'AUC': AUC, 'AUPR': AUPR, 'MCC': MCC, 'ACC': ACC,
+                'Precision': P, 'Recall': R, 'F1-Score': F1
+            })
+            
+            fold_time = (time.time() - fold_start) / 60
+            print(f"Done ({fold_time:.1f}min, AUC={AUC:.4f})")
+        
+        # Calculate average metrics across folds
+        avg_metrics = {
+            'AUC': np.mean([f['AUC'] for f in fold_metrics]),
+            'AUPR': np.mean([f['AUPR'] for f in fold_metrics]),
+            'MCC': np.mean([f['MCC'] for f in fold_metrics]),
+            'ACC': np.mean([f['ACC'] for f in fold_metrics]),
+            'Precision': np.mean([f['Precision'] for f in fold_metrics]),
+            'Recall': np.mean([f['Recall'] for f in fold_metrics]),
+            'F1-Score': np.mean([f['F1-Score'] for f in fold_metrics]),
+        }
         
         end_time = time.time()
         duration = end_time - start_time
         
-        # Parse metrics from output
-        metrics = parse_output_for_metrics(result.stdout)
-        metrics['duration_seconds'] = duration
-        metrics['duration_minutes'] = duration / 60
-        metrics['success'] = True
+        avg_metrics['duration_seconds'] = duration
+        avg_metrics['duration_minutes'] = duration / 60
+        avg_metrics['success'] = True
         
         # Log to detailed log
         with open(DETAILED_LOG, 'a') as f:
@@ -112,28 +233,32 @@ def run_main_once(epoch_value, run_number):
             f.write(f"Timestamp: {datetime.now()}\n")
             f.write(f"Epochs: {epoch_value} | Run: {run_number}\n")
             f.write(f"Duration: {duration/60:.2f} minutes\n")
-            f.write(f"Metrics: {metrics}\n")
+            f.write(f"Metrics: {avg_metrics}\n")
+            f.write(f"Fold-wise metrics:\n")
+            for i, fm in enumerate(fold_metrics):
+                f.write(f"  Fold {i+1}: AUC={fm['AUC']:.4f}, AUPR={fm['AUPR']:.4f}\n")
             f.write(f"{'='*80}\n")
-            f.write(f"STDOUT:\n{result.stdout}\n")
-            if result.stderr:
-                f.write(f"STDERR:\n{result.stderr}\n")
         
         print(f"✓ Completed in {duration/60:.2f} minutes")
-        if metrics['AUC'] is not None:
-            print(f"  AUC: {metrics['AUC']:.4f}")
+        print(f"  AUC: {avg_metrics['AUC']:.4f}")
+        print(f"  AUPR: {avg_metrics['AUPR']:.4f}")
         
-        return metrics
+        return avg_metrics
         
-    except subprocess.TimeoutExpired:
-        print(f"✗ Timeout after 2 hours")
-        return {
-            'AUC': None, 'AUPR': None, 'MCC': None, 'ACC': None,
-            'Precision': None, 'Recall': None, 'F1-Score': None,
-            'duration_seconds': 7200, 'duration_minutes': 120,
-            'success': False, 'error': 'Timeout'
-        }
     except Exception as e:
         print(f"✗ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Log error
+        with open(DETAILED_LOG, 'a') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"ERROR - Timestamp: {datetime.now()}\n")
+            f.write(f"Epochs: {epoch_value} | Run: {run_number}\n")
+            f.write(f"Error: {str(e)}\n")
+            f.write(traceback.format_exc())
+            f.write(f"{'='*80}\n")
+        
         return {
             'AUC': None, 'AUPR': None, 'MCC': None, 'ACC': None,
             'Precision': None, 'Recall': None, 'F1-Score': None,
@@ -150,12 +275,16 @@ def run_epoch_experiment(epoch_value):
     # Modify config
     modify_config(epoch_value)
     
+    # Reload config to get updated EPOCHS value
+    import importlib
+    importlib.reload(config)
+    
     # Store all results for this epoch
     epoch_results = []
     
     # Run multiple times
     for run_num in range(1, RUNS_PER_EPOCH + 1):
-        metrics = run_main_once(epoch_value, run_num)
+        metrics = run_main_once(epoch_value, run_num, dataset=config.DATASET)
         metrics['epoch_value'] = epoch_value
         metrics['run_number'] = run_num
         metrics['timestamp'] = datetime.now().isoformat()
