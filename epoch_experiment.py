@@ -162,7 +162,7 @@ def run_main_once(epoch_value, run_number, dataset='dataset2'):
             lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
             mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
             
-            # Train model
+            # Train model with specified number of epochs
             trained_model, loss_history = joint_train(
                 num_lnc=num_lnc,
                 num_diseases=num_diseases,
@@ -173,6 +173,7 @@ def run_main_once(epoch_value, run_number, dataset='dataset2'):
                 lnc_mi_interaction=lnc_mi_tensor,
                 mi_di_interaction=mi_di_tensor,
                 fold=fold,
+                epochs=epoch_value,  # ← IMPORTANT: Pass epoch_value explicitly!
                 device=device
             )
             
