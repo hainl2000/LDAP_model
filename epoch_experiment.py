@@ -30,8 +30,8 @@ from main import JointVGAE_LDAGM, JointDataset, joint_train, joint_test
 import config
 
 # Experiment configuration
-EPOCHS_TO_TEST = [1, 2, 3, 4, 5, 10, 15, 20, 30, 50, 100]
-RUNS_PER_EPOCH = 10
+EPOCHS_TO_TEST = [15, 20, 30, 50, 100]
+RUNS_PER_EPOCH = 3
 LOG_DIR = "logs/epoch_experiments"
 RESULTS_FILE = f"{LOG_DIR}/epoch_experiment_results.csv"
 SUMMARY_FILE = f"{LOG_DIR}/epoch_experiment_summary.txt"
