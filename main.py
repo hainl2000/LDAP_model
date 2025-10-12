@@ -22,10 +22,12 @@ from sklearn.metrics import (
     roc_curve,
     matthews_corrcoef,
 )
+import xgboost as xgb
 import warnings
 import os
 import csv
 import config
+import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 
 
@@ -96,7 +98,7 @@ class JointVGAE_LDAGM(nn.Module):
         # VGAE component for graph representation learning
         self.vgae = VGAE_Model(vgae_in_dim, vgae_hidden_dim, vgae_embed_dim)
         
-        # LDAGM component for link prediction
+        # XGBoost component for link prediction (replacing LDAGM)
         # Input dimension: flattened features from pair_features tensor
         # pair_features shape: [batch_size, 2, features_per_node]
         # After flattening: [batch_size, 2 * features_per_node]
@@ -104,15 +106,21 @@ class JointVGAE_LDAGM(nn.Module):
         a_encoder_dim = config.A_ENCODER_DIM  # Based on A_encoder file shape
         network_num = config.NETWORK_NUM 
         features_per_node = network_num * (vgae_embed_dim + a_encoder_dim)  
-        ldagm_input_dim = 2 * features_per_node
-        self.ldagm = LDAGM(
-            input_dimension=ldagm_input_dim,
-            hidden_dimension=ldagm_hidden_dim,
-            feature_num=1,  # Single feature vector per node pair
-            hiddenLayer_num=ldagm_layers,
-            drop_rate=drop_rate,
-            use_aggregate=use_aggregate
+        self.xgb_input_dim = 2 * features_per_node
+        self.xgb_classifier = xgb.XGBClassifier(
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=1.0,
+            scale_pos_weight=1.0,  # Will be adjusted based on class imbalance
+            random_state=42,
+            eval_metric='logloss',
+            objective='binary:logistic'
         )
+        self.is_xgb_fitted = False
         
     def forward(self, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, node_pairs=None, network_num=4, fold=0, dataset="dataset1"):
         """
@@ -221,11 +229,112 @@ class JointVGAE_LDAGM(nn.Module):
         # Stack node1 and node2 final features
         pair_features = torch.stack([node1_final_features, node2_final_features], dim=1)
         
-        # Step 7: LDAGM forward pass for link prediction
-        # Reshape from [batch_size, 2, features] to [batch_size, 2*features] for LDAGM
+        # Step 7: XGBoost forward pass for link prediction (replacing LDAGM)
+        # Reshape from [batch_size, 2, features] to [batch_size, 2*features] for XGBoost
         pair_features_flattened = pair_features.view(pair_features.size(0), -1)
-        link_predictions = self.ldagm(pair_features_flattened)
+        
+        # During training, return dummy predictions (XGBoost will be fitted after VGAE training)
+        if self.training or not self.is_xgb_fitted:
+            # Return dummy predictions during training phase
+            link_predictions = torch.zeros(pair_features_flattened.size(0), device=pair_features_flattened.device)
+        else:
+            # During inference, use fitted XGBoost model for predictions
+            with torch.no_grad():
+                features_np = pair_features_flattened.detach().cpu().numpy()
+                xgb_predictions = self.xgb_classifier.predict_proba(features_np)[:, 1]  # Get positive class probabilities
+                link_predictions = torch.tensor(xgb_predictions, dtype=torch.float32, device=pair_features_flattened.device)
+        
         return reconstructed_adj, mu, log_var, link_predictions
+    
+    def get_pair_features(self, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, node_pairs, network_num=4, fold=0, dataset="dataset1"):
+        """
+        Extract features for specific node pairs for XGBoost training.
+        This method extracts features without going through the full forward pass.
+        """
+        # Step 1: Extract multi-view features using GCN-Attention
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            disease_fused_features, _, _ = executor.submit(self.disease_feature_extractor, multi_view_data['disease']).result()
+            lnc_fused_features, _, _ = executor.submit(self.lnc_feature_extractor, multi_view_data['lnc']).result()
+            mi_fused_features, _, _ = executor.submit(self.mi_feature_extractor, multi_view_data['mi']).result()
+        
+        # Step 2: Reconstruct similarity matrices from fused features in parallel
+        def reconstruct_disease_similarity():
+            return reconstruct_similarity_matrix(disease_fused_features)
+        
+        def reconstruct_lnc_similarity():
+            return reconstruct_similarity_matrix(lnc_fused_features)
+        
+        def reconstruct_mi_similarity():
+            return reconstruct_similarity_matrix(mi_fused_features)
+        
+        # Parallel reconstruction of similarity matrices
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            disease_similarity = executor.submit(reconstruct_disease_similarity).result()
+            lnc_similarity = executor.submit(reconstruct_lnc_similarity).result()
+            mi_similarity = executor.submit(reconstruct_mi_similarity).result()
+        
+        # Step 3: Concatenate into final adjacency matrix
+        adj_matrix_np = concatenate(
+            self.num_lnc, self.num_diseases, self.num_mi,
+            lnc_di_interaction.detach().cpu().numpy(),
+            lnc_mi_interaction.detach().cpu().numpy(), 
+            mi_di_interaction.detach().cpu().numpy(),
+            lnc_similarity.detach().cpu().numpy(),
+            disease_similarity.detach().cpu().numpy(),
+            mi_similarity.detach().cpu().numpy()
+        )
+        adj_matrix = torch.tensor(adj_matrix_np, dtype=torch.float32, device=config.DEVICE)
+        
+        # Step 4: Add self-loops and create features
+        num_nodes = adj_matrix.shape[0]
+        adj_input = adj_matrix
+        features_input = torch.eye(num_nodes, device=config.DEVICE)
+        
+        # Step 5: VGAE forward pass to get embeddings
+        _, mu, _ = self.vgae(adj_input, features_input)
+        
+        # Step 6: Extract features for link prediction following MyDataset pattern
+        # Load A_encoder files for each network in the loop
+        A_encoders = []
+        for i in range(network_num):
+            A_encoder = np.load(
+                "./our_dataset/"
+                + dataset
+                + "/Temp_A_encoder/A_"
+                + str(fold + 1)
+                + "_"
+                + str(i + 1)
+                + ".npy"
+            )
+            A_encoders.append(torch.tensor(A_encoder, dtype=torch.float32, device=config.DEVICE))
+        
+        # Get computational embeddings from VGAE
+        node1_computational_embeddings = mu[node_pairs[:, 0]]
+        node2_computational_embeddings = mu[node_pairs[:, 1]]
+        
+        # Collect features from all networks for each node
+        node1_all_features = []
+        node2_all_features = []
+        
+        for i in range(network_num):
+            # Concatenate computational embeddings with A_encoder features for each network
+            node1_features_net_i = torch.cat([node1_computational_embeddings, A_encoders[i][node_pairs[:, 0]]], dim=1)
+            node2_features_net_i = torch.cat([node2_computational_embeddings, A_encoders[i][node_pairs[:, 1]]], dim=1)
+            
+            node1_all_features.append(node1_features_net_i)
+            node2_all_features.append(node2_features_net_i)
+        
+        # Concatenate features from all networks for each node
+        node1_final_features = torch.cat(node1_all_features, dim=1)
+        node2_final_features = torch.cat(node2_all_features, dim=1)
+        
+        # Stack node1 and node2 final features
+        pair_features = torch.stack([node1_final_features, node2_final_features], dim=1)
+        
+        # Flatten features for XGBoost
+        pair_features_flattened = pair_features.view(pair_features.size(0), -1)
+        
+        return pair_features_flattened.detach().cpu().numpy()
 
 def joint_loss_function(reconstructed_adj, original_adj, mu, log_var, 
                        link_predictions, link_labels, num_nodes, pos_weight,
@@ -417,6 +526,49 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             print(f"  KL Divergence: {avg_losses['kl_divergence']:.4f}")
             print(f"  Link Prediction: {avg_losses['link_prediction']:.4f}")
     
+    # Phase 2: Train XGBoost on extracted features
+    print("\nPhase 2: Training XGBoost classifier on extracted features...")
+    model.eval()
+    
+    all_features = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch_node_pairs, batch_labels in dataloader:
+            batch_node_pairs = batch_node_pairs.to(device)
+            batch_labels = batch_labels.cpu().numpy()
+            
+            # Extract features for XGBoost
+            features = model.get_pair_features(
+                multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, 
+                batch_node_pairs, network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
+            )
+            
+            all_features.append(features)
+            all_labels.append(batch_labels)
+    
+    # Concatenate all features and labels
+    X_train = np.vstack(all_features)
+    y_train = np.concatenate(all_labels)
+    
+    # Calculate class imbalance ratio for scale_pos_weight
+    neg_count = np.sum(y_train == 0)
+    pos_count = np.sum(y_train == 1)
+    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
+    
+    print(f"Training XGBoost with {X_train.shape[0]} samples and {X_train.shape[1]} features...")
+    print(f"Class distribution - Positive: {pos_count}, Negative: {neg_count}")
+    print(f"Setting scale_pos_weight to: {scale_pos_weight:.4f}")
+    
+    # Update XGBoost classifier with calculated scale_pos_weight
+    model.xgb_classifier.set_params(scale_pos_weight=scale_pos_weight)
+    
+    # Train XGBoost classifier
+    model.xgb_classifier.fit(X_train, y_train)
+    model.is_xgb_fitted = True
+    
+    print("XGBoost training completed!")
+    
     return model, loss_history
 
 def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_size=32, fold=0, device='cpu'):
@@ -455,8 +607,12 @@ def joint_test(model, test_dataset, multi_view_data, lnc_di_interaction, lnc_mi_
             _, _, _, link_predictions = model(multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs,
                                             network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET)
             
-            # Apply sigmoid to get probabilities
-            predictions = torch.sigmoid(link_predictions)
+            # XGBoost predict_proba already returns probabilities, no need for sigmoid
+            # For dummy predictions during training, they are zeros, so we can apply sigmoid safely
+            if model.is_xgb_fitted:
+                predictions = link_predictions  # XGBoost probabilities, no sigmoid needed
+            else:
+                predictions = torch.sigmoid(link_predictions)  # Apply sigmoid only for dummy predictions
             
             all_predictions.extend(predictions.cpu().numpy())
             all_labels.extend(batch_labels.numpy())
@@ -478,6 +634,59 @@ def log_to_csv(config, metrics):
             writer.writeheader()
         writer.writerow({**metrics, **hyperparams})
 
+def plot_roc_curve(test_labels, test_predictions, fold=None, dataset="dataset1", save_path=None):
+    """
+    Plot ROC curve for the given predictions and labels.
+    
+    Args:
+        test_labels: True binary labels
+        test_predictions: Predicted probabilities for the positive class
+        fold: Fold number (if None, plots overall results)
+        dataset: Dataset name for the plot title
+        save_path: Path to save the plot (if None, uses default naming)
+    """
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(test_labels, test_predictions)
+    roc_auc = roc_auc_score(test_labels, test_predictions)
+    
+    # Create the plot
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, 
+             label=f'ROC curve (AUC = {roc_auc:.4f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
+             label='Random classifier')
+    
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    
+    if fold is not None:
+        plt.title(f'ROC Curve - {dataset} (Fold {fold})')
+    else:
+        plt.title(f'ROC Curve - {dataset} (Overall)')
+    
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    
+    # Save the plot
+    if save_path is None:
+        if fold is not None:
+            save_path = f"./results/roc_curve_{dataset}_fold_{fold}.png"
+        else:
+            save_path = f"./results/roc_curve_{dataset}_overall.png"
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"ROC curve saved to: {save_path}")
+    
+    # Show the plot
+    plt.show()
+    
+    return fpr, tpr, roc_auc
+
 if __name__ == '__main__':
     log_hyperparameters()
     start_time = time.time()
@@ -497,6 +706,8 @@ if __name__ == '__main__':
     
     # Initialize results storage for all folds
     all_fold_results = []
+    all_test_labels = []
+    all_test_predictions = []
     
     print(f"Starting 5-fold cross-validation for {dataset}...")
     
@@ -635,6 +846,10 @@ if __name__ == '__main__':
         print(f"Recall: {R:.4f}")
         print(f"F1-Score: {F1:.4f}")
         
+        # Plot ROC curve for this fold
+        # print(f"\nGenerating ROC curve for fold {fold + 1}...")
+        # plot_roc_curve(test_labels, test_predictions, fold=fold+1, dataset=dataset)
+        
         # Store results for this fold
         fold_results = {
             "fold": fold + 1,
@@ -647,6 +862,10 @@ if __name__ == '__main__':
             "F1-Score": F1
         }
         all_fold_results.append(fold_results)
+        
+        # Store predictions and labels for overall ROC curve
+        all_test_labels.extend(test_labels)
+        all_test_predictions.extend(test_predictions)
     
     # Calculate statistics across all folds
     print("\n" + "="*60)
@@ -668,6 +887,12 @@ if __name__ == '__main__':
         mean_val = results_df[metric].mean()
         std_val = results_df[metric].std()
         print(f"{metric:12s}: {mean_val:.4f} ± {std_val:.4f}")
+    
+    # Create overall ROC curve from all folds
+    # print("\nGenerating overall ROC curve from all folds...")
+    # all_test_labels = np.array(all_test_labels)
+    # all_test_predictions = np.array(all_test_predictions)
+    # plot_roc_curve(all_test_labels, all_test_predictions, fold=None, dataset=dataset)
     
     # End timing
     end_time = time.time()
