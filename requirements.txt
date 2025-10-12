@@ -5,3 +5,4 @@ scikit-learn
 matplotlib
 networkx
 obonet
+torch-geometric

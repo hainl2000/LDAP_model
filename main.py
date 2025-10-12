@@ -26,6 +26,7 @@ import warnings
 import os
 import csv
 import config
+import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 
 
@@ -190,7 +191,7 @@ class JointVGAE_LDAGM(nn.Module):
             A_encoder = np.load(
                 "./our_dataset/"
                 + dataset
-                + "/Temp_A_encoder/A_"
+                + "/A_encoder/A_"
                 + str(fold + 1)
                 + "_"
                 + str(i + 1)
@@ -478,6 +479,59 @@ def log_to_csv(config, metrics):
             writer.writeheader()
         writer.writerow({**metrics, **hyperparams})
 
+def plot_roc_curve(test_labels, test_predictions, fold=None, dataset="dataset2", save_path=None, trial=None):
+    """
+    Plot ROC curve for the given predictions and labels.
+    
+    Args:
+        test_labels: True binary labels
+        test_predictions: Predicted probabilities for the positive class
+        fold: Fold number (if None, plots overall results)
+        dataset: Dataset name for the plot title
+        save_path: Path to save the plot (if None, uses default naming)
+    """
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(test_labels, test_predictions)
+    roc_auc = roc_auc_score(test_labels, test_predictions)
+    
+    # Create the plot
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, 
+             label=f'ROC curve (AUC = {roc_auc:.4f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', 
+             label='Random classifier')
+    
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    
+    if fold is not None:
+        plt.title(f'ROC Curve - {dataset} (Fold {fold})')
+    else:
+        plt.title(f'ROC Curve - {dataset} (Overall)')
+    
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    
+    # Save the plot
+    if save_path is None:
+        if fold is not None:
+            save_path = f"./results/three/roc_curve_{dataset}_trial_{trial}_fold_{fold}.png"
+        else:
+            save_path = f"./results/three/roc_curve_{dataset}_trial_{trial}_overall.png"
+    
+    # Create results directory if it doesn't exist
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"ROC curve saved to: {save_path}")
+    
+    # Show the plot
+    plt.show()
+    
+    return fpr, tpr, roc_auc
+
 if __name__ == '__main__':
     log_hyperparameters()
     start_time = time.time()
@@ -495,208 +549,226 @@ if __name__ == '__main__':
             print(f"Warning: {config.DEVICE} not available, falling back to CPU")
     print(f"Using device: {device}")
     
-    # Initialize results storage for all folds
-    all_fold_results = []
-    
-    print(f"Starting 5-fold cross-validation for {dataset}...")
-    
-    for fold in range(config.TOTAL_FOLDS):
-        print(f"\n{'='*50}")
-        print(f"Starting Fold {fold + 1}/5")
-        print(f"{'='*50}")
-    
-        # Load data (same as original)
-        positive5foldsidx = np.load(
-            "./our_dataset/" + dataset + "/index/positive5foldsidx.npy",
-            allow_pickle=True,
-        )
-        negative5foldsidx = np.load(
-            "./our_dataset/" + dataset + "/index/negative5foldsidx.npy",
-            allow_pickle=True,
-        )
-        positive_ij = np.load("./our_dataset/" + dataset + "/index/positive_ij.npy")
-        negative_ij = np.load("./our_dataset/" + dataset + "/index/negative_ij.npy")
-    
-        train_positive_ij = positive_ij[positive5foldsidx[fold]["train"]]
-        train_negative_ij = negative_ij[negative5foldsidx[fold]["train"]]
-        test_positive_ij = positive_ij[positive5foldsidx[fold]["test"]]
-        test_negative_ij = negative_ij[negative5foldsidx[fold]["test"]]
-    
-        # Load similarity matrices
-        di_semantic_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_semantic_similarity.npy")
-        di_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_gip_similarity_fold_{fold+1}.npy")
-        lnc_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_gip_similarity_fold_{fold+1}.npy")
-        lnc_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_func_similarity_fold_{fold+1}.npy")
-        mi_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_gip_similarity.npy")
-        mi_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_func_similarity.npy")
-    
-        # Load interaction matrices
-        lnc_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_di.csv')
-        lnc_di.set_index('0', inplace=True)
-        lnc_di = lnc_di.values
-        lnc_di_copy = copy.copy(lnc_di)
-        
-        lnc_mi = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_mi.csv', index_col='0').values
-        mi_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/mi_di.csv')
-        mi_di.set_index('0', inplace=True)
-        mi_di = mi_di.values
-    
-        # Get dimensions
-        num_diseases = di_semantic_similarity.shape[0]
-        num_lnc = lnc_gip_similarity.shape[0]
-        num_mi = mi_gip_similarity.shape[0]
-        num_views = 2
-        lncRNALen = num_lnc
-        
-        # Remove test edges from training adjacency matrix
-        for ij in positive_ij[positive5foldsidx[fold]['test']]:
-            lnc_di_copy[ij[0], ij[1] - lncRNALen] = 0
-    
-        # Create adjacency matrices for each entity type
-        disease_adjacency_matrices = [
-            torch.tensor(di_semantic_similarity, dtype=torch.float32).to(device), 
-            torch.tensor(di_gip_similarity, dtype=torch.float32).to(device)
-        ]
-        lnaRNA_adjacency_matrices = [
-            torch.tensor(lnc_gip_similarity, dtype=torch.float32).to(device), 
-            torch.tensor(lnc_func_similarity, dtype=torch.float32).to(device)
-        ]
-        miRNA_adjacency_matrices = [
-            torch.tensor(mi_gip_similarity, dtype=torch.float32).to(device), 
-            torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
-        ]
-        
-        # Create datasets
-        train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
-        test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
-    
-        # Prepare multi-view data structure for GCN-Attention
-        multi_view_data = {
-            'disease': disease_adjacency_matrices,
-            'lnc': lnaRNA_adjacency_matrices,
-            'mi': miRNA_adjacency_matrices
-        }
-        
-        # Prepare interaction matrices as tensors
-        lnc_di_tensor = torch.tensor(lnc_di_copy, dtype=torch.float32).to(device)
-        lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
-        mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
-        
-        print(f"Starting joint end-to-end training for fold {fold + 1}...")
-        
-        # Joint training with end-to-end GCN-Attention integration
-        trained_model, loss_history = joint_train(
-            num_lnc=num_lnc,
-            num_diseases=num_diseases,
-            num_mi=num_mi,
-            train_dataset=train_dataset,
-            multi_view_data=multi_view_data,
-            lnc_di_interaction=lnc_di_tensor,
-            lnc_mi_interaction=lnc_mi_tensor,
-            mi_di_interaction=mi_di_tensor,
-            fold=fold,
-            device=device
-        )
-    
-        print(f"\nTesting joint model for fold {fold + 1}...")
-        
-        # Testing with end-to-end GCN-Attention integration
-        test_labels, test_predictions = joint_test(
-            model=trained_model,
-            test_dataset=test_dataset,
-            multi_view_data=multi_view_data,
-            lnc_di_interaction=lnc_di_tensor,
-            lnc_mi_interaction=lnc_mi_tensor,
-            mi_di_interaction=mi_di_tensor,
-            fold=fold,
-            batch_size=config.BATCH_SIZE,
-            device=device
-        )
-        
-        # Evaluate results
-        AUC = roc_auc_score(test_labels, test_predictions)
-        precision, recall, _ = precision_recall_curve(test_labels, test_predictions)
-        AUPR = auc(recall, precision)
-        
-        # Binary predictions for other metrics
-        binary_preds = (test_predictions > 0.5).astype(int)
-        MCC = matthews_corrcoef(test_labels, binary_preds)
-        ACC = accuracy_score(test_labels, binary_preds)
-        P = precision_score(test_labels, binary_preds)
-        R = recall_score(test_labels, binary_preds)
-        F1 = f1_score(test_labels, binary_preds)
+    for trial in range(3):
 
-        print(f"\n=== Fold {fold + 1} Results ===")
-        print(f"AUC: {AUC:.4f}")
-        print(f"AUPR: {AUPR:.4f}")
-        print(f"MCC: {MCC:.4f}")
-        print(f"ACC: {ACC:.4f}")
-        print(f"Precision: {P:.4f}")
-        print(f"Recall: {R:.4f}")
-        print(f"F1-Score: {F1:.4f}")
+        # Initialize results storage for all folds
+        all_fold_results = []
+        all_test_labels = []
+        all_test_predictions = []
         
-        # Store results for this fold
-        fold_results = {
-            "fold": fold + 1,
-            "AUC": AUC,
-            "AUPR": AUPR,
-            "MCC": MCC,
-            "ACC": ACC,
-            "Precision": P,
-            "Recall": R,
-            "F1-Score": F1
-        }
-        all_fold_results.append(fold_results)
-    
-    # Calculate statistics across all folds
-    print("\n" + "="*60)
-    print("5-FOLD CROSS-VALIDATION RESULTS SUMMARY")
-    print("="*60)
-    
-    # Convert results to DataFrame for easier analysis
-    results_df = pd.DataFrame(all_fold_results)
-    
-    # Calculate mean and std for each metric
-    metrics = ['AUC', 'AUPR', 'MCC', 'ACC', 'Precision', 'Recall', 'F1-Score']
-    
-    print("\nDetailed Results by Fold:")
-    print(results_df.to_string(index=False, float_format='%.4f'))
-    
-    print("\nStatistical Summary:")
-    print("-" * 50)
-    for metric in metrics:
-        mean_val = results_df[metric].mean()
-        std_val = results_df[metric].std()
-        print(f"{metric:12s}: {mean_val:.4f} ± {std_val:.4f}")
-    
-    # End timing
-    end_time = time.time()
-    total_seconds = end_time - start_time
-    m, s = divmod(total_seconds, 60)
-    h, m = divmod(m, 60)
-    print(f"\nTotal runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds")
-    
-    # Log to file
-    with open(config.LOG_FILE, 'a') as f:
-        f.write("\n=== 5-Fold Cross-Validation Results ===\n")
+        print(f"Starting 5-fold cross-validation for {dataset}...")
+        
+        for fold in range(config.TOTAL_FOLDS):
+            print(f"\n{'='*50}")
+            print(f"Starting Fold {fold + 1}/5")
+            print(f"{'='*50}")
+        
+            # Load data (same as original)
+            positive5foldsidx = np.load(
+                "./our_dataset/" + dataset + "/index/positive5foldsidx.npy",
+                allow_pickle=True,
+            )
+            negative5foldsidx = np.load(
+                "./our_dataset/" + dataset + "/index/negative5foldsidx.npy",
+                allow_pickle=True,
+            )
+            positive_ij = np.load("./our_dataset/" + dataset + "/index/positive_ij.npy")
+            negative_ij = np.load("./our_dataset/" + dataset + "/index/negative_ij.npy")
+        
+            train_positive_ij = positive_ij[positive5foldsidx[fold]["train"]]
+            train_negative_ij = negative_ij[negative5foldsidx[fold]["train"]]
+            test_positive_ij = positive_ij[positive5foldsidx[fold]["test"]]
+            test_negative_ij = negative_ij[negative5foldsidx[fold]["test"]]
+        
+            # Load similarity matrices
+            di_semantic_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_semantic_similarity.npy")
+            di_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/di_gip_similarity_fold_{fold+1}.npy")
+            lnc_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_gip_similarity_fold_{fold+1}.npy")
+            lnc_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/lnc_func_similarity_fold_{fold+1}.npy")
+            mi_gip_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_gip_similarity.npy")
+            mi_func_similarity = np.load("./our_dataset/" + dataset + f"/multi_similarities/mi_func_similarity.npy")
+        
+            # Load interaction matrices
+            lnc_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_di.csv')
+            lnc_di.set_index('0', inplace=True)
+            lnc_di = lnc_di.values
+            lnc_di_copy = copy.copy(lnc_di)
+            
+            lnc_mi = pd.read_csv('./our_dataset/' + dataset + '/interaction/lnc_mi.csv', index_col='0').values
+            mi_di = pd.read_csv('./our_dataset/' + dataset + '/interaction/mi_di.csv')
+            mi_di.set_index('0', inplace=True)
+            mi_di = mi_di.values
+        
+            # Get dimensions
+            num_diseases = di_semantic_similarity.shape[0]
+            num_lnc = lnc_gip_similarity.shape[0]
+            num_mi = mi_gip_similarity.shape[0]
+            num_views = 2
+            lncRNALen = num_lnc
+            
+            # Remove test edges from training adjacency matrix
+            for ij in positive_ij[positive5foldsidx[fold]['test']]:
+                lnc_di_copy[ij[0], ij[1] - lncRNALen] = 0
+        
+            # Create adjacency matrices for each entity type
+            disease_adjacency_matrices = [
+                torch.tensor(di_semantic_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(di_gip_similarity, dtype=torch.float32).to(device)
+            ]
+            lnaRNA_adjacency_matrices = [
+                torch.tensor(lnc_gip_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(lnc_func_similarity, dtype=torch.float32).to(device)
+            ]
+            miRNA_adjacency_matrices = [
+                torch.tensor(mi_gip_similarity, dtype=torch.float32).to(device), 
+                torch.tensor(mi_func_similarity, dtype=torch.float32).to(device)
+            ]
+            
+            # Create datasets
+            train_dataset = JointDataset(train_positive_ij, train_negative_ij, "train", dataset)
+            test_dataset = JointDataset(test_positive_ij, test_negative_ij, "test", dataset)
+        
+            # Prepare multi-view data structure for GCN-Attention
+            multi_view_data = {
+                'disease': disease_adjacency_matrices,
+                'lnc': lnaRNA_adjacency_matrices,
+                'mi': miRNA_adjacency_matrices
+            }
+            
+            # Prepare interaction matrices as tensors
+            lnc_di_tensor = torch.tensor(lnc_di_copy, dtype=torch.float32).to(device)
+            lnc_mi_tensor = torch.tensor(lnc_mi, dtype=torch.float32).to(device)
+            mi_di_tensor = torch.tensor(mi_di, dtype=torch.float32).to(device)
+            
+            print(f"Starting joint end-to-end training for fold {fold + 1}...")
+            
+            # Joint training with end-to-end GCN-Attention integration
+            trained_model, loss_history = joint_train(
+                num_lnc=num_lnc,
+                num_diseases=num_diseases,
+                num_mi=num_mi,
+                train_dataset=train_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                device=device
+            )
+        
+            print(f"\nTesting joint model for fold {fold + 1}...")
+            
+            # Testing with end-to-end GCN-Attention integration
+            test_labels, test_predictions = joint_test(
+                model=trained_model,
+                test_dataset=test_dataset,
+                multi_view_data=multi_view_data,
+                lnc_di_interaction=lnc_di_tensor,
+                lnc_mi_interaction=lnc_mi_tensor,
+                mi_di_interaction=mi_di_tensor,
+                fold=fold,
+                batch_size=config.BATCH_SIZE,
+                device=device
+            )
+            
+            # Evaluate results
+            AUC = roc_auc_score(test_labels, test_predictions)
+            precision, recall, _ = precision_recall_curve(test_labels, test_predictions)
+            AUPR = auc(recall, precision)
+            
+            # Binary predictions for other metrics
+            binary_preds = (test_predictions > 0.5).astype(int)
+            MCC = matthews_corrcoef(test_labels, binary_preds)
+            ACC = accuracy_score(test_labels, binary_preds)
+            P = precision_score(test_labels, binary_preds)
+            R = recall_score(test_labels, binary_preds)
+            F1 = f1_score(test_labels, binary_preds)
+
+            print(f"\n=== Fold {fold + 1} Results ===")
+            print(f"AUC: {AUC:.4f}")
+            print(f"AUPR: {AUPR:.4f}")
+            print(f"MCC: {MCC:.4f}")
+            print(f"ACC: {ACC:.4f}")
+            print(f"Precision: {P:.4f}")
+            print(f"Recall: {R:.4f}")
+            print(f"F1-Score: {F1:.4f}")
+            
+            # Plot ROC curve for this fold
+            # print(f"\nGenerating ROC curve for fold {fold + 1}...")
+            # plot_roc_curve(test_labels, test_predictions, fold=fold+1, dataset=dataset, trial=trial)
+            
+            # Store results for this fold
+            fold_results = {
+                "fold": fold + 1,
+                "AUC": AUC,
+                "AUPR": AUPR,
+                "MCC": MCC,
+                "ACC": ACC,
+                "Precision": P,
+                "Recall": R,
+                "F1-Score": F1
+            }
+            all_fold_results.append(fold_results)
+            
+            # Store predictions and labels for overall ROC curve
+            # all_test_labels.extend(test_labels)
+            # all_test_predictions.extend(test_predictions)
+        
+        # Calculate statistics across all folds
+        print("\n" + "="*60)
+        print("5-FOLD CROSS-VALIDATION RESULTS SUMMARY")
+        print("="*60)
+        
+        # Convert results to DataFrame for easier analysis
+        results_df = pd.DataFrame(all_fold_results)
+        
+        # Calculate mean and std for each metric
+        metrics = ['AUC', 'AUPR', 'MCC', 'ACC', 'Precision', 'Recall', 'F1-Score']
+        
+        print("\nDetailed Results by Fold:")
+        print(results_df.to_string(index=False, float_format='%.4f'))
+        
+        print("\nStatistical Summary:")
+        print("-" * 50)
         for metric in metrics:
             mean_val = results_df[metric].mean()
             std_val = results_df[metric].std()
-            f.write(f"{metric}: {mean_val:.4f} ± {std_val:.4f}\n")
-        f.write(f"Total runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds\n")
-        f.write("================================================\n")
-    
-    # Log average metrics to CSV
-    avg_metrics = {
-        "AUC": results_df['AUC'].mean(),
-        "AUPR": results_df['AUPR'].mean(),
-        "MCC": results_df['MCC'].mean(),
-        "ACC": results_df['ACC'].mean(),
-        "Precision": results_df['Precision'].mean(),
-        "Recall": results_df['Recall'].mean(),
-        "F1-Score": results_df['F1-Score'].mean(),
-        "Time": f"{int(h)} hours, {int(m)} minutes, and {s:.2f} seconds",
-    }
-    log_to_csv(config, avg_metrics)
-    
-    print("\n5-fold cross-validation completed successfully!")
+            print(f"{metric:12s}: {mean_val:.4f} ± {std_val:.4f}")
+        
+        # Create overall ROC curve from all folds
+        # print("\nGenerating overall ROC curve from all folds...")
+        # all_test_labels = np.array(all_test_labels)
+        # all_test_predictions = np.array(all_test_predictions)
+        # plot_roc_curve(all_test_labels, all_test_predictions, fold=None, dataset=dataset, trial=trial)
+        
+        # End timing
+        end_time = time.time()
+        total_seconds = end_time - start_time
+        m, s = divmod(total_seconds, 60)
+        h, m = divmod(m, 60)
+        print(f"\nTotal runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds")
+        
+        # Log to file
+        with open(config.LOG_FILE, 'a') as f:
+            f.write("\n=== 5-Fold Cross-Validation Results ===\n")
+            for metric in metrics:
+                mean_val = results_df[metric].mean()
+                std_val = results_df[metric].std()
+                f.write(f"{metric}: {mean_val:.4f} ± {std_val:.4f}\n")
+            f.write(f"Total runtime: {int(h)} hours, {int(m)} minutes, and {s:.2f} seconds\n")
+            f.write("================================================\n")
+        
+        # Log average metrics to CSV
+        avg_metrics = {
+            "AUC": results_df['AUC'].mean(),
+            "AUPR": results_df['AUPR'].mean(),
+            "MCC": results_df['MCC'].mean(),
+            "ACC": results_df['ACC'].mean(),
+            "Precision": results_df['Precision'].mean(),
+            "Recall": results_df['Recall'].mean(),
+            "F1-Score": results_df['F1-Score'].mean(),
+            "Time": f"{int(h)} hours, {int(m)} minutes, and {s:.2f} seconds",
+        }
+        log_to_csv(config, avg_metrics)
+        
+        print("\n5-fold cross-validation completed successfully!")

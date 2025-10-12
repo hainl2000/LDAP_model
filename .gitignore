@@ -8,3 +8,5 @@ our_dataset/dataset3/A_new_encoder/
 our_dataset/dataset2/result/gate_results.csv
 logs/
 temp_folders/
+our_dataset_copy/
+results/
