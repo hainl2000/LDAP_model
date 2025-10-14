@@ -190,7 +190,7 @@ class JointVGAE_LDAGM(nn.Module):
             A_encoder = np.load(
                 "./our_dataset/"
                 + dataset
-                + "/Temp_A_encoder/A_"
+                + "/A_vgae_encoder/A_"
                 + str(fold + 1)
                 + "_"
                 + str(i + 1)
