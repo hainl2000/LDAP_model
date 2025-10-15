@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import DataLoader, Dataset
 from construct_multiview_gcn_gat import concatenate, MultiViewFeatureExtractor, reconstruct_similarity_matrix
 from vgae_model import VGAE_Model
+from gate_model import GraphConvolution
 from LDAGM import LDAGM
 from sklearn.metrics import (
     accuracy_score,
@@ -93,8 +94,11 @@ class JointVGAE_LDAGM(nn.Module):
             self.lnc_feature_extractor = executor.submit(create_lnc_extractor).result()
             self.mi_feature_extractor = executor.submit(create_mi_extractor).result()
         
-        # VGAE component for graph representation learning
-        self.vgae = VGAE_Model(vgae_in_dim, vgae_hidden_dim, vgae_embed_dim)
+        # GraphConvolution component for graph representation learning
+        self.graph_conv = GraphConvolution(
+            in_dimension=vgae_in_dim,
+            embedding_dimension=vgae_embed_dim
+        )
         
         # LDAGM component for link prediction
         # Input dimension: flattened features from pair_features tensor
@@ -177,8 +181,12 @@ class JointVGAE_LDAGM(nn.Module):
         adj_input = adj_matrix
         features_input = torch.eye(num_nodes, device=config.DEVICE)
         
-        # Step 5: VGAE forward pass
-        reconstructed_adj, mu, log_var = self.vgae(adj_input, features_input)
+        # Step 5: GraphConvolution forward pass
+        rd, re = self.graph_conv(adj_input, features_input)
+        # For compatibility with existing code, map GraphConvolution outputs
+        reconstructed_adj = rd
+        mu = re  # Use re as the embedding representation
+        log_var = torch.zeros_like(mu)  # Dummy log_var since GraphConvolution doesn't provide it
         
         if node_pairs is None:
             return reconstructed_adj, mu, log_var
@@ -198,7 +206,7 @@ class JointVGAE_LDAGM(nn.Module):
             )
             A_encoders.append(torch.tensor(A_encoder, dtype=torch.float32, device=config.DEVICE))
         
-        # Get computational embeddings from VGAE
+        # Get computational embeddings from GraphConvolution
         node1_computational_embeddings = mu[node_pairs[:, 0]]
         node2_computational_embeddings = mu[node_pairs[:, 1]]
         
@@ -228,40 +236,40 @@ class JointVGAE_LDAGM(nn.Module):
         return reconstructed_adj, mu, log_var, link_predictions
 
 def joint_loss_function(reconstructed_adj, original_adj, mu, log_var, 
-                       link_predictions, link_labels, num_nodes, pos_weight,
+                       link_predictions, link_labels, num_nodes,
                        vgae_weight=1.0, link_weight=1.0, kl_weight=0.1):
     """
-    Unified loss function for joint end-to-end training.
+    Unified loss function for joint end-to-end training using MSE loss.
     
     Args:
-        reconstructed_adj: Reconstructed adjacency matrix from VGAE
+        reconstructed_adj: Reconstructed adjacency matrix from GraphConvolution
         original_adj: Original adjacency matrix
-        mu: Mean of latent distribution
-        log_var: Log variance of latent distribution
+        mu: Embeddings from GraphConvolution
+        log_var: Log variance (dummy for GraphConvolution)
         link_predictions: Link prediction scores from LDAGM
         link_labels: Ground truth link labels
         num_nodes: Number of nodes in the graph
-        pos_weight: Weight for positive samples in reconstruction loss
-        vgae_weight: Weight for VGAE reconstruction loss
+        vgae_weight: Weight for GraphConvolution reconstruction loss
         link_weight: Weight for link prediction loss
-        kl_weight: Weight for KL divergence term
+        kl_weight: Weight for KL divergence term (not used with GraphConvolution)
         
     Returns:
         Combined loss value and individual loss components
     """
-    # VGAE reconstruction loss
-    vgae_reconstruction_loss = F.binary_cross_entropy_with_logits(
+    # GraphConvolution reconstruction loss using MSE
+    mse_loss = nn.MSELoss(reduction='mean')
+    vgae_reconstruction_loss = mse_loss(
         reconstructed_adj.view(-1), 
-        original_adj.view(-1), 
-        pos_weight=pos_weight
+        original_adj.view(-1)
     )
     
-    # KL divergence loss
-    kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp()) / num_nodes
+    # KL divergence loss (set to zero for GraphConvolution)
+    kl_loss = torch.tensor(0.0, device=mu.device)
     
-    # Link prediction loss
-    link_prediction_loss = F.binary_cross_entropy_with_logits(
-        link_predictions, link_labels
+    # Link prediction loss using MSE
+    link_prediction_loss = mse_loss(
+        link_predictions.view(-1), 
+        link_labels.view(-1)
     )
     
     # Combined loss
@@ -333,8 +341,6 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
     # Model parameters
     num_nodes = num_lnc + num_diseases + num_mi
     in_dimension = num_lnc + num_diseases + num_mi
-    total_links = (lnc_di_np.sum() + lnc_mi_np.sum() + mi_di_np.sum())*2 + num_lnc + num_diseases + num_mi
-    pos_weight = torch.tensor(float(num_nodes**2 - total_links) / total_links, device=device)
 
     # Initialize joint model
     model = JointVGAE_LDAGM(
@@ -372,7 +378,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             
             optimizer.zero_grad()
             
-            # Forward pass with end-to-end GCN-Attention + VGAE + LDAGM
+            # Forward pass with end-to-end GCN-Attention + GraphConvolution + LDAGM
             reconstructed_adj, mu, log_var, link_predictions = model(
                 multi_view_data, lnc_di_interaction, lnc_mi_interaction, mi_di_interaction, batch_node_pairs, 
                 network_num=config.NETWORK_NUM, fold=fold, dataset=config.DATASET
@@ -389,7 +395,7 @@ def joint_train(num_lnc, num_diseases, num_mi, train_dataset, multi_view_data,
             # Compute joint loss using the dynamically generated adjacency matrix
             total_loss, loss_components = joint_loss_function(
                 reconstructed_adj, original_adj_reconstructed.detach(), mu, log_var,
-                link_predictions, batch_labels, num_nodes, pos_weight,
+                link_predictions, batch_labels, num_nodes,
                 vgae_weight, link_weight, kl_weight
             )
             
